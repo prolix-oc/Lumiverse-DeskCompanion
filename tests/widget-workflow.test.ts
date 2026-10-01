@@ -60,6 +60,7 @@ async function widget(options: { stt?: Promise<Response>; tts?: Promise<Response
   host.mutable.sendToFrontend = (payload, userId, routing) => { host.sent.push({ payload, userId, options: routing }); backendMessage(payload); };
   const uninstall = installCompanion(host.api);
   const context = { manifest: { identifier: "desk_companion" },
+    host: { ...host.mutable.host, capabilities: { "frontend-session-origin-v1": 1 } }, frontendSessionId: "session-a",
     permissions: { async getGranted() { return ["ui_panels", "characters", "generation", "screen_capture", "screen_recording"]; } },
     getActiveChat: () => ({ characterId: "character-a", chatId: null }),
     events: { on(name: string, callback: (payload: unknown) => void) { events.set(name, callback); return () => events.delete(name); } },

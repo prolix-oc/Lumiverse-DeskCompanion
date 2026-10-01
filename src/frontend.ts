@@ -1,6 +1,6 @@
 import type { SpindleFrontendContext } from "lumiverse-spindle-types";
 import { mountCompanionWidget } from "./companion-widget";
-import { REQUIRED_PERMISSIONS } from "./protocol";
+import { REQUIRED_PERMISSIONS, record } from "./protocol";
 import { STYLES } from "./styles";
 
 export function setup(ctx: SpindleFrontendContext): () => void {
@@ -23,10 +23,14 @@ export function setup(ctx: SpindleFrontendContext): () => void {
   async function show(): Promise<void> {
     try {
       const granted = await ctx.permissions.getGranted();
-      if (disposed || destroyWidget) return;
-      if (!granted.includes("ui_panels")) { status.textContent = "Grant UI Panels before opening the widget."; return; }
-      if ((ctx.host.capabilities["frontend-session-routing-v1"] ?? 0) < 1 || !ctx.frontendSessionId) {
-        status.textContent = "Update Lumiverse: this demo requires document-targeted frontend session routing."; return;
+      if (disposed) return;
+      if (!granted.includes("ui_panels")) {
+        const destroy = destroyWidget; destroyWidget = null; destroy?.();
+        status.textContent = "Grant UI Panels before opening the widget."; return;
+      }
+      if (destroyWidget) return;
+      if ((ctx.host.capabilities["frontend-session-origin-v1"] ?? 0) < 1 || !ctx.frontendSessionId) {
+        status.textContent = "Update Lumiverse's frontend: this demo requires document-scoped frontend session identity."; return;
       }
       destroyWidget = mountCompanionWidget(ctx);
       status.textContent = "The companion widget is registered. Desktop pop-outs use the host's Floating Widgets controls.";
@@ -39,10 +43,14 @@ export function setup(ctx: SpindleFrontendContext): () => void {
   };
   showButton.addEventListener("click", showHandler);
   permissionButton.addEventListener("click", permissionHandler);
+  const unsubscribePermissions = ctx.events.on("SPINDLE_PERMISSION_CHANGED", (payload) => {
+    if (!disposed && record(payload) && payload.extensionId === ctx.host.extensionInstallationId) void show();
+  });
   void show();
   return () => {
     if (disposed) return;
     disposed = true; destroyWidget?.(); destroyWidget = null;
+    unsubscribePermissions();
     showButton.removeEventListener("click", showHandler); permissionButton.removeEventListener("click", permissionHandler);
     about.replaceChildren(); tab.destroy(); removeStyle();
   };

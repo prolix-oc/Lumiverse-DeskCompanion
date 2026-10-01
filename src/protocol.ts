@@ -4,6 +4,11 @@ export const MAX_REPLY = 4000;
 export const CHARACTER_PAGE_SIZE = 50;
 export const REQUIRED_PERMISSIONS = ["ui_panels", "characters", "generation", "screen_capture"];
 
+export function createMessageId(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 export interface VoiceRef {
   connectionId: string;
   voice: string;

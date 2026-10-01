@@ -14,6 +14,15 @@ test("declares distinct main and lightweight system widget entries", () => {
   expect(source("src/companion-widget.ts")).toContain("ctx.ui.createFloatWidget");
   expect(source("src/companion-widget.ts")).toContain("spindle:desktop-widget-returned");
   expect(source("package.json")).toContain('"lumiverse-spindle-types": "0.6.37"');
+  expect(JSON.parse(source("package.json")).version).toBe(manifest.version);
+});
+
+test("frontend gates on session origin while the worker gates on server routing", () => {
+  for (const entry of ["src/frontend.ts", "src/companion-widget.ts"]) {
+    expect(source(entry)).toContain('"frontend-session-origin-v1"');
+    expect(source(entry)).not.toContain('"frontend-session-routing-v1"');
+  }
+  expect(source("src/worker.ts")).toContain('"frontend-session-routing-v1"');
 });
 
 test("frontend has no capture API, capture IPC, media handles, history writes, or autonomous capture loop", () => {

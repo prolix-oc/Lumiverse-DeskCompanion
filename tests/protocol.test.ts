@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { CHANNEL, characterVoice, mediaSupport, parseClientMessage, safeLabel } from "../src/protocol";
+import { CHANNEL, characterVoice, createMessageId, identifier, mediaSupport, parseClientMessage, safeLabel } from "../src/protocol";
 
 describe("request and character boundaries", () => {
+  test("generates bounded opaque message IDs without a secure-context-only UUID API", () => {
+    const first = createMessageId(); const second = createMessageId();
+    expect(first).toMatch(/^[0-9a-f]{32}$/); expect(identifier(first)).toBe(true); expect(second).not.toBe(first);
+  });
   const input = { channel: CHANNEL, id: "request-a", clientId: "client-a", type: "observe", characterId: "character-a",
     connectionId: "model-a", deviceId: "desktop-a", question: "What is visible?", kind: "image", durationSeconds: 3 };
   test("rejects malformed, unbounded, and replay requests", () => {

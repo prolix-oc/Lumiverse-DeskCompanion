@@ -17,7 +17,7 @@ The build emits `dist/backend.js`, `dist/frontend.js`, and a minified `dist/widg
 
 ## Install and try it
 
-1. Use the Lumiverse/backend and Desktop builds containing the capture integration. The manifest's version floor is 1.2.4, but the exact release number alone is insufficient: the demo also checks `desktop-capture-worker-v1` and `frontend-session-routing-v1` at runtime.
+1. Use the Lumiverse/backend and Desktop builds containing the capture integration. The manifest's version floor is 1.2.4, but the exact release number alone is insufficient: the widget checks `frontend-session-origin-v1` and `ctx.frontendSessionId` on the frontend; the worker separately checks `desktop-capture-worker-v1` and `frontend-session-routing-v1` on the backend. The server-routing capability is not a frontend capability and must not gate widget creation.
 2. Create/publish the repository yourself, update `spindle.json`'s `github` if needed, and install through Lumiverse's Extensions panel. Its standard installer requires a repository URL; this demo does not modify the host database or invent a local-folder install API. The host can build the sources, or you can ship the generated `dist/` bundles.
 3. Enable the extension and grant `ui_panels`, `characters`, `generation`, and the desired `screen_capture`/`screen_recording` permissions. Capture grants require administrator/owner approval; they never replace native consent. If the widget is not visible, open the **Desk Companion** drawer tab and press **Open companion widget**.
 4. In the desktop tray, use **Browser → Enable Extension Screen Capture…**. Sign in through the native OAuth flow for the same account that owns the model connection. A browser cookie alone does not enable native capture.
@@ -49,6 +49,12 @@ The main action runs the selected sequence. **Native source selection, preview, 
 Both speech options default off. The selected voice is snapshotted when a share starts, and only that request's completed response can trigger TTS once. Partial tokens, other documents, failed/declined captures, or cancelled requests cannot trigger it. Stop disables pending automatic speech for the current share; Cancel/Clear/disposal also abort voice input and speech. STT failure stops before requesting screen capture; TTS failure leaves the generated text intact without retrying paid requests. Starting another share stops old playback before listening, avoiding a TTS-to-STT feedback loop.
 
 Configuration remains memory-only and resets on reload or a newly created native pop-out. Microphone support depends on the secure browser/native webview and OS/browser microphone consent; unsupported windows can still use typed input. Browser consent is origin-level, **not a new per-extension Spindle permission**. This demo is not a hardened microphone sandbox for malicious frontend extensions; a host-brokered microphone capability and permission-gated Spindle STT consumer remain separate platform work. This change uses the existing authenticated STT REST endpoints rather than claiming such a worker API exists.
+
+## Widget startup troubleshooting
+
+Version 0.1.1 fixes a startup gate that incorrectly looked for the backend's `frontend-session-routing-v1` in the frontend descriptor. The frontend provides `frontend-session-origin-v1`; the worker still independently requires server routing. It also retries widget creation when UI Panels is granted after startup, and scopes permission/native-return events to the installation ID rather than the manifest identifier. Widget message IDs use `crypto.getRandomValues`, without requiring the secure-context-only `crypto.randomUUID` API; microphone security requirements are unchanged.
+
+If upgrading from 0.1.0, publish the changed project, update the installed extension, and reload its frontend (or disable/re-enable it and refresh the desktop browser). Rebuilding the backend or the local project alone does not replace the extension bundle installed from its repository. Open the **Desk Companion** drawer tab to see startup status. Native screen-capture enablement controls capture requests, not widget registration. No backend/Tauri rebuild is needed for this extension-only fix.
 
 ## API integration
 

@@ -1,5 +1,5 @@
 import type { SpindleFrontendContext } from "lumiverse-spindle-types";
-import { CHANNEL, CHARACTER_PAGE_SIZE, MAX_QUESTION, REQUIRED_PERMISSIONS, record } from "./protocol";
+import { CHANNEL, CHARACTER_PAGE_SIZE, MAX_QUESTION, REQUIRED_PERMISSIONS, createMessageId, record } from "./protocol";
 import type { Catalog, CharacterOption, ClientMessage, ServerMessage, VoiceRef } from "./protocol";
 import { MAX_SPEECH_CHARS, listSpeechConnections, synthesizeReply } from "./speech";
 import type { SpeechConnection } from "./speech";
@@ -8,7 +8,7 @@ import type { TranscriptionConnection } from "./speech-input";
 import { AutomaticShareSpeech, prepareShareQuestion } from "./share-workflow";
 
 export function mountView(ctx: SpindleFrontendContext, root: HTMLElement): { panel: HTMLElement; dispose: () => void } {
-  const clientId = crypto.randomUUID();
+  const clientId = createMessageId();
   const panel = document.createElement("section");
   panel.className = "dc-shell";
   panel.setAttribute("aria-label", "Desk Companion");
@@ -87,7 +87,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement): { pan
     cleanups.push(() => target.removeEventListener(event, handler));
   }
 
-  function send(body: Omit<Extract<ClientMessage, { type: "catalog" }>, "channel" | "id" | "clientId"> | Omit<Extract<ClientMessage, { type: "observe" }>, "channel" | "id" | "clientId"> | Omit<Extract<ClientMessage, { type: "cancel" }>, "channel" | "id" | "clientId">, id: string = crypto.randomUUID()): string {
+  function send(body: Omit<Extract<ClientMessage, { type: "catalog" }>, "channel" | "id" | "clientId"> | Omit<Extract<ClientMessage, { type: "observe" }>, "channel" | "id" | "clientId"> | Omit<Extract<ClientMessage, { type: "cancel" }>, "channel" | "id" | "clientId">, id: string = createMessageId()): string {
     ctx.sendToBackend({ channel: CHANNEL, clientId, id, ...body });
     return id;
   }
@@ -266,7 +266,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement): { pan
     if (element<HTMLButtonElement>("observe").disabled) return;
     clearReply();
     const selectedVoice = autoSpeak.checked ? { connectionId: tts.value, voice: voice.value, speed: Number(speed.value) } : null;
-    const requestId = crypto.randomUUID();
+    const requestId = createMessageId();
     automaticSpeech.arm(requestId, selectedVoice);
     const request = { type: "observe" as const, characterId: character.value, connectionId: connection.value, deviceId: device.value,
       kind: kind.value as "image" | "video", durationSeconds: Number(duration.value), question: question.value };
@@ -312,7 +312,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement): { pan
       .catch(() => { if (!disposed) notice("Permission request was declined. An administrator/owner must approve capture grants.", true); });
   });
   cleanups.push(ctx.events.on("SPINDLE_PERMISSION_CHANGED", (payload) => {
-    if (!record(payload) || payload.extensionId !== ctx.manifest.identifier) return;
+    if (!record(payload) || payload.extensionId !== ctx.host.extensionInstallationId) return;
     if (payload.granted === false) { cancel(); clearReply(); }
     void ctx.permissions.getGranted().then((permissions) => { if (!disposed) { granted = permissions; updateControls(); } }).catch(() => {});
   }));
