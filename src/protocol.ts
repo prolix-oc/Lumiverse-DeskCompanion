@@ -1,3 +1,6 @@
+import { parseSettingsPatch } from "./settings";
+import type { CompanionSettings, CompanionSnapshot } from "./settings";
+
 export const CHANNEL = "desk-companion/v1";
 export const MAX_QUESTION = 1200;
 export const MAX_REPLY = 4000;
@@ -53,12 +56,23 @@ interface Envelope {
 }
 
 export type ClientMessage = Envelope & (
+  | { type: "subscribe"; surface?: "settings" | "widget" }
+  | { type: "unsubscribe" | "clear-state" | "stop-speech" | "open-settings" }
+  | { type: "configure"; patch: Partial<CompanionSettings> }
+  | { type: "begin-share"; revision: number }
+  | { type: "input-stage"; targetId: string; stage: "listening" | "transcribing" }
+  | { type: "input-ended"; targetId: string; message: string }
+  | { type: "cancel-shared"; targetId: string }
+  | { type: "speech-stage"; targetId: string; stage: "idle" | "synthesizing" | "ready" | "playing" }
   | { type: "catalog"; page: number; activeCharacterId?: string }
   | { type: "observe"; characterId: string; connectionId: string; deviceId: string; question: string; kind: "image" | "video"; durationSeconds: number }
   | { type: "cancel"; targetId: string }
 );
 
 export type ServerMessage = Envelope & (
+  | { type: "state"; snapshot: CompanionSnapshot }
+  | { type: "stop-local"; targetId: string; speechOnly: boolean }
+  | { type: "open-settings" }
   | { type: "catalog"; catalog: Catalog }
   | { type: "status"; stage: "checking" | "consent" | "generating" | "cancelling" }
   | { type: "text"; text: string }
@@ -66,9 +80,11 @@ export type ServerMessage = Envelope & (
   | { type: "error"; code: ErrorCode; message: string }
 );
 
-export type ErrorCode = "INVALID_REQUEST" | "HOST_UNSUPPORTED" | "BUSY" | "COOLDOWN" | "CHARACTER_UNAVAILABLE" | "CONNECTION_UNAVAILABLE" | "DEVICE_UNAVAILABLE" | "MEDIA_UNSUPPORTED" | "PERMISSION_REQUIRED" | "CAPTURE_FAILED" | "CANCELLED" | "TIMED_OUT" | "GENERATION_FAILED" | "OUTPUT_LIMIT";
+export type ErrorCode = "INVALID_REQUEST" | "HOST_UNSUPPORTED" | "BUSY" | "COOLDOWN" | "CHARACTER_UNAVAILABLE" | "CONNECTION_UNAVAILABLE" | "DEVICE_UNAVAILABLE" | "MEDIA_UNSUPPORTED" | "PERMISSION_REQUIRED" | "CAPTURE_FAILED" | "CANCELLED" | "TIMED_OUT" | "GENERATION_FAILED" | "OUTPUT_LIMIT" | "SETTINGS_FAILED" | "SETTINGS_CHANGED";
 
 export const ERROR_MESSAGES: Record<ErrorCode, string> = {
+  SETTINGS_FAILED: "Companion settings could not be loaded or saved. Refresh before sharing; no capture was requested.",
+  SETTINGS_CHANGED: "Companion settings changed in another window. Review the updated settings, then share again.",
   INVALID_REQUEST: "Choose a character, connection, and desktop. An optional question must be at most 1,200 characters.",
   HOST_UNSUPPORTED: "This host needs Desktop capture and frontend-session routing support. Update Lumiverse and its desktop client.",
   BUSY: "An observation is already running for this account. Finish or discard it first.",
@@ -102,6 +118,29 @@ export function identifier(value: unknown): value is string {
 export function parseClientMessage(value: unknown): ClientMessage | null {
   if (!record(value) || value.channel !== CHANNEL || !identifier(value.id) || !identifier(value.clientId)) return null;
   const envelope = { channel: CHANNEL, id: value.id, clientId: value.clientId } as const;
+  if (value.type === "subscribe" && (value.surface === undefined || value.surface === "settings" || value.surface === "widget")) {
+    return { ...envelope, type: "subscribe", surface: value.surface as "settings" | "widget" | undefined };
+  }
+  if (["unsubscribe", "clear-state", "stop-speech", "open-settings"].includes(String(value.type))) {
+    return { ...envelope, type: value.type as "unsubscribe" | "clear-state" | "stop-speech" | "open-settings" };
+  }
+  if (value.type === "configure") {
+    const patch = parseSettingsPatch(value.patch);
+    return patch ? { ...envelope, type: "configure", patch } : null;
+  }
+  if (value.type === "begin-share" && Number.isSafeInteger(value.revision) && Number(value.revision) >= 0) {
+    return { ...envelope, type: "begin-share", revision: Number(value.revision) };
+  }
+  if (value.type === "cancel-shared" && identifier(value.targetId)) return { ...envelope, type: "cancel-shared", targetId: value.targetId };
+  if (value.type === "speech-stage" && identifier(value.targetId) && ["idle", "synthesizing", "ready", "playing"].includes(String(value.stage))) {
+    return { ...envelope, type: "speech-stage", targetId: value.targetId, stage: value.stage as "idle" | "synthesizing" | "ready" | "playing" };
+  }
+  if (value.type === "input-stage" && identifier(value.targetId) && ["listening", "transcribing"].includes(String(value.stage))) {
+    return { ...envelope, type: "input-stage", targetId: value.targetId, stage: value.stage as "listening" | "transcribing" };
+  }
+  if (value.type === "input-ended" && identifier(value.targetId) && typeof value.message === "string" && value.message.length <= 400) {
+    return { ...envelope, type: "input-ended", targetId: value.targetId, message: value.message };
+  }
   if (value.type === "cancel" && identifier(value.targetId)) return { ...envelope, type: "cancel", targetId: value.targetId };
   if (value.type === "catalog" && Number.isInteger(value.page) && Number(value.page) >= 0 && Number(value.page) <= 10000
     && (value.activeCharacterId === undefined || identifier(value.activeCharacterId))) {

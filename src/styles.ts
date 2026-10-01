@@ -1,7 +1,9 @@
 export const STYLES = `
 .dc-shell,.dc-about { box-sizing:border-box; color:var(--lumiverse-text,#eeeaf8); font:13px/1.5 system-ui,-apple-system,sans-serif; }
 .dc-shell *,.dc-about * { box-sizing:border-box; }
-.dc-shell { height:100%; min-height:0; overflow:auto; padding:18px; background:var(--lumiverse-bg,#191724); border-radius:12px; scrollbar-width:thin; }
+.dc-shell { width:100%; height:100%; min-height:0; max-height:100%; overflow-y:auto; overflow-x:hidden; overscroll-behavior:contain; touch-action:pan-y; user-select:text; padding:18px; background:var(--lumiverse-bg,#191724); border-radius:12px; scrollbar-width:thin; }
+.dc-settings { height:auto; max-height:none; overflow:visible; margin-top:20px; }
+.dc-widget .dc-destination { white-space:pre-wrap; }
 .dc-shell header { display:flex; gap:12px; align-items:center; margin-bottom:16px; }
 .dc-mark { display:grid; place-items:center; width:42px; height:42px; flex-shrink:0; border-radius:14px; color:#d5f8ee; background:linear-gradient(135deg,#456b65,#55456f); font-size:22px; }
 .dc-shell h2,.dc-about h2 { font-size:17px; margin:0; letter-spacing:-.3px; }

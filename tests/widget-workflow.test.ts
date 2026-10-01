@@ -17,7 +17,7 @@ async function widget(options: { stt?: Promise<Response>; tts?: Promise<Response
   let microphoneRequests = 0;
   let tracksStopped = 0;
   let playback = 0;
-  let backendMessage: (payload: unknown) => void = () => {};
+  const backendMessages = new Map<string, Set<(payload: unknown) => void>>();
   const stream = { getTracks: () => [{ stop() { tracksStopped += 1; } }] } as unknown as MediaStream;
   class Recorder {
     state = "inactive";
@@ -57,27 +57,39 @@ async function widget(options: { stt?: Promise<Response>; tts?: Promise<Response
     Option: dom.window.Option, MediaRecorder: Recorder, fetch: request };
   for (const [name, value] of Object.entries(replacements)) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
   host.mutable.desktop.capture.request = async (input) => { host.requests.push(input); return approval.promise; };
-  host.mutable.sendToFrontend = (payload, userId, routing) => { host.sent.push({ payload, userId, options: routing }); backendMessage(payload); };
+  host.mutable.sendToFrontend = (payload, userId, routing) => {
+    host.sent.push({ payload, userId, options: routing });
+    for (const handler of [...(backendMessages.get(routing?.frontendSessionId ?? "") ?? [])]) handler(payload);
+  };
   const uninstall = installCompanion(host.api);
-  const context = { manifest: { identifier: "desk_companion" },
-    host: { ...host.mutable.host, capabilities: { "frontend-session-origin-v1": 1 } }, frontendSessionId: "session-a",
+  function context(sessionId: string): SpindleFrontendContext { return { manifest: { identifier: "desk_companion" },
+    host: { ...host.mutable.host, capabilities: { "frontend-session-origin-v1": 1 } }, frontendSessionId: sessionId,
     permissions: { async getGranted() { return ["ui_panels", "characters", "generation", "screen_capture", "screen_recording"]; } },
     getActiveChat: () => ({ characterId: "character-a", chatId: null }),
     events: { on(name: string, callback: (payload: unknown) => void) { events.set(name, callback); return () => events.delete(name); } },
-    sendToBackend(payload: unknown) { outgoing.push(payload); host.emit(payload); },
-    onBackendMessage(callback: (payload: unknown) => void) { backendMessage = callback; return () => { backendMessage = () => {}; }; },
-  } as unknown as SpindleFrontendContext;
-  const view = mountView(context, dom.window.document.querySelector("main")!);
+    sendToBackend(payload: unknown) { outgoing.push(payload); host.emit(payload, "user-a", sessionId); },
+    onBackendMessage(callback: (payload: unknown) => void) {
+      const handlers = backendMessages.get(sessionId) ?? new Set(); handlers.add(callback); backendMessages.set(sessionId, handlers);
+      return () => { handlers.delete(callback); };
+    },
+  } as unknown as SpindleFrontendContext; }
+  const settings = mountView(context("session-a"), dom.window.document.querySelector("main")!, { surface: "settings" });
+  const view = mountView(context("session-b"), dom.window.document.querySelector("main")!);
   await settle();
-  const element = <ElementType extends HTMLElement>(role: string) => view.panel.querySelector<ElementType>(`[data-role="${role}"]`)!;
-  const enable = (role: string) => { const control = element<HTMLInputElement>(role); control.checked = true; control.dispatchEvent(new dom.window.Event("input")); };
-  return { host, view, outgoing, events, element, enable, requests,
+  await new Promise((resolve) => setTimeout(resolve, 140)); await settle();
+  const element = <ElementType extends HTMLElement>(role: string) => (view.panel.querySelector<ElementType>(`[data-role="${role}"]`)
+    ?? settings.panel.querySelector<ElementType>(`[data-role="${role}"]`))!;
+  const synchronize = async () => { await new Promise((resolve) => setTimeout(resolve, 140)); await settle(); };
+  const enable = async (role: string) => {
+    const control = element<HTMLInputElement>(role); control.checked = true; control.dispatchEvent(new dom.window.Event("input")); await synchronize();
+  };
+  return { host, view, settings, context, dom, outgoing, events, element, enable, synchronize, requests,
     microphoneRequests: () => microphoneRequests, tracksStopped: () => tracksStopped, playback: () => playback,
     paid: (path: string) => requests.filter((entry) => entry.url === path),
     approve: async () => { approval.resolve(host.capture); await settle(); },
-    message: (payload: unknown) => backendMessage(payload),
+    message: (payload: unknown) => { for (const callback of backendMessages.get("session-b") ?? []) callback(payload); },
     async close() {
-      view.dispose(); uninstall(); approval.resolve(host.capture); await settle(); dom.window.close();
+      view.dispose(); settings.dispose(); uninstall(); approval.resolve(host.capture); await settle(); dom.window.close();
       for (const name of globals) {
         const descriptor = previous.get(name);
         if (descriptor) Object.defineProperty(globalThis, name, descriptor);
@@ -88,6 +100,68 @@ async function widget(options: { stt?: Promise<Response>; tts?: Promise<Response
 }
 
 describe("configured widget share pipeline", () => {
+  test("sidebar edits immediately synchronize after saving to a different widget document", async () => {
+    const screen = await widget();
+    try {
+      expect(screen.view.panel.querySelectorAll("select,input,textarea")).toHaveLength(0);
+      const question = screen.element<HTMLTextAreaElement>("question");
+      question.value = "What catches your eye?"; question.dispatchEvent(new screen.dom.window.Event("input"));
+      await screen.synchronize();
+      screen.element<HTMLButtonElement>("observe").click(); await settle();
+      const observe = screen.outgoing.find((entry) => entry.type === "observe");
+      expect(observe.question).toBe("What catches your eye?");
+      expect(screen.settings.panel.querySelector<HTMLSelectElement>('[data-role="character"]')!.disabled).toBe(true);
+      await screen.approve();
+      expect(screen.element("reply").textContent).toBe("You have a calendar open.");
+      expect(screen.settings.panel.querySelector('[data-role="status"]')!.textContent).toContain("Answered using one approved image");
+    } finally { await screen.close(); }
+  });
+
+  test("an unavailable saved desktop never silently switches to another available device", async () => {
+    const screen = await widget();
+    try {
+      const saved = screen.host.sent.filter((entry) => entry.payload.type === "state" && entry.options?.frontendSessionId === "session-b").at(-1)!.payload;
+      screen.message({ ...saved, snapshot: { ...saved.snapshot, sequence: saved.snapshot.sequence + 100,
+        settings: { ...saved.snapshot.settings, deviceId: "disconnected-desktop" } } });
+      expect(screen.element<HTMLButtonElement>("observe").disabled).toBe(true);
+      expect(screen.host.requests).toHaveLength(0);
+    } finally { await screen.close(); }
+  });
+
+  test("reopening a native widget restores shared configuration and reply without replaying paid speech", async () => {
+    const screen = await widget(); let reopened: ReturnType<typeof mountView> | null = null;
+    try {
+      await screen.enable("auto-speak"); screen.element<HTMLButtonElement>("observe").click(); await settle(); await screen.approve();
+      reopened = mountView(screen.context("session-c"), screen.dom.window.document.querySelector("main")!);
+      await settle();
+      expect(reopened.panel.querySelector('[data-role="reply"]')!.textContent).toBe("You have a calendar open.");
+      expect(reopened.panel.querySelector('[data-role="widget-summary"]')!.textContent).toContain("Mira");
+      expect(reopened.panel.querySelectorAll("select,input,textarea")).toHaveLength(0);
+      expect(screen.paid("/api/v1/tts/synthesize")).toHaveLength(1);
+      expect(reopened.panel.querySelector('[data-role="speech-status"]')!.textContent).toContain("Speaking in another companion window");
+      reopened.panel.querySelector<HTMLButtonElement>('[data-role="stop-speech"]')!.click(); await settle();
+      expect(screen.element<HTMLAudioElement>("audio").hidden).toBe(true);
+      reopened.panel.querySelector<HTMLButtonElement>('[data-role="clear"]')!.click(); await settle();
+      expect(screen.element("reply").textContent).not.toContain("calendar");
+    } finally { reopened?.dispose(); await screen.close(); }
+  });
+
+  test("another widget mirrors and cancels a pending transcription without starting its own microphone", async () => {
+    const transcription = deferred<Response>(); const screen = await widget({ stt: transcription.promise });
+    const other = mountView(screen.context("session-c"), screen.dom.window.document.querySelector("main")!);
+    try {
+      await settle(); await screen.enable("voice-input");
+      screen.element<HTMLButtonElement>("observe").click(); await settle();
+      expect(other.panel.querySelector<HTMLButtonElement>('[data-role="observe"]')!.disabled).toBe(true);
+      expect(other.panel.querySelector('[data-role="badge"]')!.textContent).toBe("Transcribing");
+      other.panel.querySelector<HTMLButtonElement>('[data-role="cancel"]')!.click(); await settle();
+      expect(screen.paid("/api/v1/stt/transcribe")[0].input?.signal?.aborted).toBe(true);
+      transcription.resolve(Response.json({ text: "Too late" })); await settle();
+      expect(screen.microphoneRequests()).toBe(1); expect(screen.host.requests).toHaveLength(0);
+      expect(other.panel.querySelector<HTMLButtonElement>('[data-role="observe"]')!.disabled).toBe(false);
+    } finally { transcription.resolve(Response.json({ text: "Too late" })); other.dispose(); await screen.close(); }
+  });
+
   test("defaults to text-only with no microphone or paid TTS on load or share", async () => {
     const screen = await widget();
     try {
@@ -104,12 +178,11 @@ describe("configured widget share pipeline", () => {
   test("one main action runs timed STT, approved capture, character generation, and TTS exactly once", async () => {
     const screen = await widget();
     try {
-      screen.enable("auto-speak"); screen.enable("voice-input");
+      await screen.enable("auto-speak"); await screen.enable("voice-input");
       screen.element<HTMLButtonElement>("observe").click(); await settle();
       expect(screen.microphoneRequests()).toBe(1); expect(screen.tracksStopped()).toBeGreaterThan(0);
       expect(screen.paid("/api/v1/stt/transcribe")).toHaveLength(1); expect(screen.host.requests).toHaveLength(1);
       expect(screen.host.generations).toHaveLength(0); expect(screen.paid("/api/v1/tts/synthesize")).toHaveLength(0);
-      expect(screen.element("input-status").textContent).toContain("What do you think?");
       expect(screen.element<HTMLInputElement>("auto-speak").disabled).toBe(true);
       await screen.approve();
       expect(screen.host.generations).toHaveLength(1);
@@ -119,13 +192,13 @@ describe("configured widget share pipeline", () => {
       expect(body).toEqual({ connectionId: "voice-a", text: "You have a calendar open.", voice: "warm", parameters: { speed: 1.1 } });
       screen.message(screen.host.sent.find((entry) => entry.payload.type === "complete")?.payload); await settle();
       expect(screen.paid("/api/v1/tts/synthesize")).toHaveLength(1);
-      expect(screen.host.sent.every((entry) => entry.options?.frontendSessionId === "session-a" && entry.userId === "user-a")).toBe(true);
+      expect(screen.host.sent.every((entry) => ["session-a", "session-b"].includes(entry.options?.frontendSessionId ?? "") && entry.userId === "user-a")).toBe(true);
     } finally { await screen.close(); }
   });
   test("Stop prevents pending automatic speech without cancelling the character's text", async () => {
     const screen = await widget();
     try {
-      screen.enable("auto-speak"); screen.element<HTMLButtonElement>("observe").click(); await settle();
+      await screen.enable("auto-speak"); screen.element<HTMLButtonElement>("observe").click(); await settle();
       screen.element<HTMLButtonElement>("stop-speech").click(); await screen.approve();
       expect(screen.host.generations).toHaveLength(1); expect(screen.paid("/api/v1/tts/synthesize")).toHaveLength(0);
       expect(screen.element("reply").textContent).toBe("You have a calendar open.");
@@ -134,7 +207,7 @@ describe("configured widget share pipeline", () => {
   test("cancelled STT cannot open screen consent, dispatch generation, or speak a late reply", async () => {
     const transcription = deferred<Response>(); const screen = await widget({ stt: transcription.promise });
     try {
-      screen.enable("voice-input"); screen.enable("auto-speak"); screen.element<HTMLButtonElement>("observe").click(); await settle();
+      await screen.enable("voice-input"); await screen.enable("auto-speak"); screen.element<HTMLButtonElement>("observe").click(); await settle();
       expect(screen.paid("/api/v1/stt/transcribe")).toHaveLength(1);
       screen.element<HTMLButtonElement>("cancel").click();
       expect(screen.paid("/api/v1/stt/transcribe")[0].input?.signal?.aborted).toBe(true);
@@ -146,7 +219,7 @@ describe("configured widget share pipeline", () => {
   test("microphone denial stops before screen capture rather than silently running a different request", async () => {
     const screen = await widget({ microphoneDenied: true });
     try {
-      screen.enable("voice-input"); screen.element<HTMLButtonElement>("observe").click(); await settle();
+      await screen.enable("voice-input"); screen.element<HTMLButtonElement>("observe").click(); await settle();
       expect(screen.host.requests).toHaveLength(0); expect(screen.host.generations).toHaveLength(0);
       expect(screen.element("status").textContent).toContain("Microphone access was declined");
     } finally { await screen.close(); }
@@ -154,16 +227,16 @@ describe("configured widget share pipeline", () => {
   test("autoplay denial keeps audio controls available without retrying synthesis", async () => {
     const screen = await widget({ autoplayBlocked: true });
     try {
-      screen.enable("auto-speak"); screen.element<HTMLButtonElement>("observe").click(); await settle(); await screen.approve();
+      await screen.enable("auto-speak"); screen.element<HTMLButtonElement>("observe").click(); await settle(); await screen.approve();
       expect(screen.paid("/api/v1/tts/synthesize")).toHaveLength(1); expect(screen.element<HTMLAudioElement>("audio").hidden).toBe(false);
-      expect(screen.element<HTMLDetailsElement>("speech-options").open).toBe(true);
+      expect(screen.view.panel.querySelector("audio")).not.toBeNull();
       expect(screen.element("speech-status").textContent).toContain("requires pressing Play");
     } finally { await screen.close(); }
   });
   test("TTS failure retains generated text without restarting generation", async () => {
     const screen = await widget({ tts: Promise.resolve(new Response("PRIVATE_PROVIDER_ERROR", { status: 502 })) });
     try {
-      screen.enable("auto-speak"); screen.element<HTMLButtonElement>("observe").click(); await settle(); await screen.approve();
+      await screen.enable("auto-speak"); screen.element<HTMLButtonElement>("observe").click(); await settle(); await screen.approve();
       expect(screen.host.generations).toHaveLength(1); expect(screen.paid("/api/v1/tts/synthesize")).toHaveLength(1);
       expect(screen.element("reply").textContent).toBe("You have a calendar open.");
       expect(screen.element("speech-status").textContent).not.toContain("PRIVATE_PROVIDER_ERROR");
@@ -172,7 +245,7 @@ describe("configured widget share pipeline", () => {
   test("Clear aborts pending auto-TTS and discards late audio", async () => {
     const synthesis = deferred<Response>(); const screen = await widget({ tts: synthesis.promise });
     try {
-      screen.enable("auto-speak"); screen.element<HTMLButtonElement>("observe").click(); await settle(); await screen.approve();
+      await screen.enable("auto-speak"); screen.element<HTMLButtonElement>("observe").click(); await settle(); await screen.approve();
       screen.element<HTMLButtonElement>("clear").click();
       expect(screen.paid("/api/v1/tts/synthesize")[0].input?.signal?.aborted).toBe(true);
       synthesis.resolve(new Response("audio", { headers: { "Content-Type": "audio/wav" } })); await settle();

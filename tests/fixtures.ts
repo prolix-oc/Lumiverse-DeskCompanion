@@ -31,8 +31,13 @@ export function fixture() {
   const generations: any[] = [];
   const released: Array<{ assetId: string; userId?: string }> = [];
   const events = new Map<string, (...args: any[]) => void>();
+  const stored = new Map<string, unknown>();
   let handler: (payload: unknown, userId: string, frontendSessionId?: string) => void = () => {};
   const api = {
+    userStorage: {
+      async getJson(path: string, options: { fallback?: unknown; userId?: string } = {}) { return stored.get(JSON.stringify([options.userId, path])) ?? options.fallback; },
+      async setJson(path: string, value: unknown, options: { userId?: string } = {}) { stored.set(JSON.stringify([options.userId, path]), structuredClone(value)); },
+    },
     host: { descriptorVersion: 1, lumiverseVersion: "1.2.4", extensionInstallationId: "installation-a", capabilities: { "desktop-capture-worker-v1": 1, "frontend-session-routing-v1": 1 } },
     onFrontendMessage(callback: typeof handler) { handler = callback; return () => { handler = () => {}; }; },
     sendToFrontend(payload: unknown, userId?: string, options?: { frontendSessionId?: string }) { sent.push({ payload, userId, options }); },
@@ -61,6 +66,6 @@ export function fixture() {
   };
   const message = (id = "request-a", overrides: Record<string, unknown> = {}) => ({ channel: CHANNEL, id, clientId: "client-a", type: "observe",
     characterId: "character-a", connectionId: "model-a", deviceId: "desktop-a", kind: "image", durationSeconds: 3, question: "What do you notice?", ...overrides });
-  return { api: api as unknown as SpindleAPI, mutable: api, now, capture, connection, device, sent, gets, requests, generations, released, events, message,
+  return { api: api as unknown as SpindleAPI, mutable: api, now, capture, connection, device, sent, gets, requests, generations, released, events, stored, message,
     emit(payload: unknown, userId = "user-a", sessionId: string | undefined = "session-a") { handler(payload, userId, sessionId); } };
 }

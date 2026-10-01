@@ -2,8 +2,9 @@ import type { CapturedMediaRef, CharacterDTO, SpindleAPI } from "lumiverse-spind
 import { assembleMessages } from "./prompt";
 import { CHANNEL, CHARACTER_PAGE_SIZE, DeskError, ERROR_MESSAGES, MAX_REPLY, characterVoice, mediaSupport, parseClientMessage, record, safeLabel } from "./protocol";
 import type { Catalog, CharacterOption, ClientMessage, ErrorCode, ServerMessage } from "./protocol";
+import { createCompanionState } from "./companion-state";
 
-interface Route {
+export interface Route {
   userId: string;
   frontendSessionId: string;
   clientId: string;
@@ -17,7 +18,7 @@ interface Run extends Route {
 }
 
 type Observe = Extract<ClientMessage, { type: "observe" }>;
-type ResponseBody = ServerMessage extends infer Message ? Message extends ServerMessage ? Omit<Message, "channel" | "id" | "clientId"> : never : never;
+export type ResponseBody = ServerMessage extends infer Message ? Message extends ServerMessage ? Omit<Message, "channel" | "id" | "clientId"> : never : never;
 
 function characterOption(character: CharacterDTO): CharacterOption {
   return { id: character.id, name: safeLabel(character.name), voice: characterVoice(character.extensions) };
@@ -39,9 +40,20 @@ export function installCompanion(api: SpindleAPI, options: { now?: () => number;
   const lastCapture = new Map<string, number>();
   const catalogJobs = new Set<string>();
   let disposed = false;
+  const sharedState = createCompanionState(api, (route) => {
+    const run = active.get(route.userId);
+    if (run?.id === route.id && run.clientId === route.clientId && run.frontendSessionId === route.frontendSessionId) run.controller.abort();
+  }, (route) => {
+    if (!compatible()) throw new DeskError("HOST_UNSUPPORTED");
+    if (active.has(route.userId) || active.size >= 8) throw new DeskError("BUSY");
+    if (lastCapture.has(route.userId) && now() - lastCapture.get(route.userId)! < 10000) throw new DeskError("COOLDOWN");
+  });
 
   function send(route: Route, body: ResponseBody): void {
-    if (!disposed) api.sendToFrontend({ channel: CHANNEL, id: route.id, clientId: route.clientId, ...body }, route.userId, { frontendSessionId: route.frontendSessionId });
+    if (!disposed) {
+      api.sendToFrontend({ channel: CHANNEL, id: route.id, clientId: route.clientId, ...body }, route.userId, { frontendSessionId: route.frontendSessionId });
+      sharedState.publish(route, body);
+    }
   }
 
   function failure(route: Route, code: ErrorCode): void {
@@ -98,6 +110,8 @@ export function installCompanion(api: SpindleAPI, options: { now?: () => number;
     const timer = setTimeout(() => { run.timedOut = true; run.controller.abort(); }, options.timeoutMs ?? 240000);
     let stage: "checking" | "consent" | "generating" = "checking";
     try {
+      await sharedState.beforeObserve(message, route);
+      assertActive(run);
       send(run, { type: "status", stage });
       const [character, connection, devices] = await Promise.all([
         api.characters.get(message.characterId, route.userId),
@@ -177,16 +191,20 @@ export function installCompanion(api: SpindleAPI, options: { now?: () => number;
       }
       return;
     }
-    void (message.type === "catalog" ? catalog(message, route) : observe(message, route)).catch(() => failure(route, "GENERATION_FAILED"));
+    if (message.type === "catalog") void catalog(message, route);
+    else if (message.type === "observe") void observe(message, route);
+    else void sharedState.handle(message, route).catch((error) => failure(route, error instanceof DeskError ? error.code : "SETTINGS_FAILED"));
   });
   const unsubscribeClosed = api.on("FRONTEND_SESSION_CLOSED", (payload, userId) => {
     if (!record(payload) || typeof payload.frontendSessionId !== "string" || !payload.frontendSessionId || !userId) return;
     const run = active.get(userId);
     if (run?.frontendSessionId === payload.frontendSessionId) run.controller.abort();
+    sharedState.closeSession(userId, payload.frontendSessionId);
   });
   const unsubscribePermissions = api.on("PERMISSION_CHANGED", (detail) => {
     if (!detail.granted && ["characters", "generation", "screen_capture", "screen_recording"].includes(detail.permission)) {
       for (const run of active.values()) run.controller.abort();
+      sharedState.revoke();
     }
   });
   return () => {
@@ -195,5 +213,6 @@ export function installCompanion(api: SpindleAPI, options: { now?: () => number;
     unsubscribeMessages(); unsubscribeClosed(); unsubscribePermissions();
     for (const run of active.values()) run.controller.abort();
     lastCapture.clear();
+    sharedState.dispose();
   };
 }

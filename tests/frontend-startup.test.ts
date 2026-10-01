@@ -13,6 +13,7 @@ function frontend(input: { capabilities?: Record<string, number>; sessionId?: st
   const backendHandlers = new Set<(payload: unknown) => void>();
   const widgetOptions: unknown[] = [];
   const widgetRoots: HTMLElement[] = [];
+  let drawerActivations = 0;
   let granted = input.granted ?? ["ui_panels", "characters", "generation", "screen_capture", "screen_recording"];
   dom.window.HTMLMediaElement.prototype.pause = () => {};
   dom.window.HTMLMediaElement.prototype.load = () => {};
@@ -26,7 +27,7 @@ function frontend(input: { capabilities?: Record<string, number>; sessionId?: st
     frontendSessionId: input.sessionId === null ? undefined : input.sessionId ?? "document-a",
     dom: { addStyle(css: string) { const style = dom.window.document.createElement("style"); style.textContent = css; dom.window.document.head.append(style); return () => style.remove(); } },
     ui: {
-      registerDrawerTab() { const drawer = dom.window.document.createElement("section"); root.append(drawer); return { root: drawer, destroy: () => drawer.remove() }; },
+      registerDrawerTab() { const drawer = dom.window.document.createElement("section"); root.append(drawer); return { root: drawer, activate: () => { drawerActivations += 1; }, destroy: () => drawer.remove() }; },
       createFloatWidget(options: unknown) {
         if (!granted.includes("ui_panels")) throw new Error("UI permission denied");
         widgetOptions.push(options);
@@ -43,6 +44,7 @@ function frontend(input: { capabilities?: Record<string, number>; sessionId?: st
     } },
   } as unknown as SpindleFrontendContext;
   return { context, root, dom, widgetRoots, widgetOptions, backendHandlers,
+    drawerActivations: () => drawerActivations,
     setGranted: (permissions: string[]) => { granted = permissions; },
     permission: (extensionId = "installed-extension-a", permission = "ui_panels", allowed = true) => {
       for (const callback of [...(callbacks.get("SPINDLE_PERMISSION_CHANGED") ?? [])]) callback({ extensionId, permission, granted: allowed, allGranted: [...granted] });
@@ -102,7 +104,8 @@ describe("real frontend session startup contract", () => {
       host.setGranted(["ui_panels", "characters", "generation", "screen_capture"]);
       host.permission("other-installation"); await settle(); expect(host.widgetRoots).toHaveLength(0);
       host.permission(); host.permission(); await settle(); expect(host.widgetRoots).toHaveLength(1);
-      expect(host.root.querySelectorAll(".dc-shell")).toHaveLength(1);
+      expect(host.root.querySelectorAll(".dc-widget")).toHaveLength(1);
+      expect(host.root.querySelectorAll(".dc-settings")).toHaveLength(1);
       host.setGranted([]); host.permission("installed-extension-a", "ui_panels", false); await settle();
       expect(host.root.querySelector(".dc-shell")).toBeNull(); expect(host.backendHandlers.size).toBe(0);
     } finally { dispose(); await host.close(); }
@@ -111,11 +114,38 @@ describe("real frontend session startup contract", () => {
     const host = frontend(); const dispose = setup(host.context);
     try {
       await settle();
-      const panel = host.root.querySelector<HTMLElement>(".dc-shell")!; panel.remove();
+      const panel = host.root.querySelector<HTMLElement>(".dc-widget")!; panel.remove();
       host.dom.window.dispatchEvent(new host.dom.window.CustomEvent("spindle:desktop-widget-returned", { detail: { extensionId: "desk_companion", widgetId: "widget-1" } }));
       expect(panel.isConnected).toBe(false);
       host.dom.window.dispatchEvent(new host.dom.window.CustomEvent("spindle:desktop-widget-returned", { detail: { extensionId: "installed-extension-a", widgetId: "widget-1" } }));
-      expect(panel.parentElement).toBe(host.widgetRoots[0]);
+      expect(panel.parentElement === host.widgetRoots[0]).toBe(true);
+    } finally { dispose(); await host.close(); }
+  });
+  test("configuration stays in the sidebar while the bounded compact widget scrolls", async () => {
+    const host = frontend(); const dispose = setup(host.context);
+    try {
+      await settle();
+      const widget = host.root.querySelector<HTMLElement>(".dc-widget")!;
+      const settings = host.root.querySelector<HTMLElement>(".dc-settings")!;
+      expect(widget.querySelectorAll("select,input,textarea")).toHaveLength(0);
+      expect(settings.querySelectorAll("select,input,textarea").length).toBeGreaterThan(10);
+      expect(settings.querySelector('[data-role="observe"]')).toBeNull();
+      expect(host.widgetOptions[0]).toMatchObject({ height: 460 });
+      expect(host.widgetRoots[0].style.height).toBe("100%");
+      expect(host.widgetRoots[0].style.minHeight).toBe("0px");
+      expect(host.dom.window.getComputedStyle(widget).overflowY).toBe("auto");
+      widget.querySelector<HTMLButtonElement>('[data-role="settings"]')!.click();
+      expect(host.drawerActivations()).toBe(1);
+    } finally { dispose(); await host.close(); }
+  });
+  test("teardown still removes listeners when the host has already deactivated frontend messaging", async () => {
+    const host = frontend(); const dispose = setup(host.context);
+    try {
+      await settle();
+      host.context.sendToBackend = () => { throw new Error("SPINDLE_FRONTEND_INACTIVE"); };
+      expect(() => dispose()).not.toThrow();
+      expect(host.backendHandlers.size).toBe(0);
+      expect(host.root.querySelectorAll(".dc-shell")).toHaveLength(0);
     } finally { dispose(); await host.close(); }
   });
 });
