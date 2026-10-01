@@ -1,4 +1,4 @@
-import type { CapturedMediaRef, CharacterDTO, SpindleAPI } from "lumiverse-spindle-types";
+import type { CapturedMediaRef, CharacterDTO, GenerationReasoningOverrideDTO, GenerationRequestDTO, SpindleAPI } from "lumiverse-spindle-types";
 import { assembleMessages } from "./prompt";
 import { CHANNEL, CHARACTER_PAGE_SIZE, DeskError, ERROR_MESSAGES, MAX_REPLY, characterVoice, mediaSupport, parseClientMessage, record, safeLabel } from "./protocol";
 import type { Catalog, CharacterOption, ClientMessage, ErrorCode, ServerMessage } from "./protocol";
@@ -29,8 +29,16 @@ function errorCode(error: unknown, stage: "checking" | "consent" | "generating")
   const message = error instanceof Error ? error.message : "";
   if (/PERMISSION_DENIED|permission.*not granted/i.test(message)) return "PERMISSION_REQUIRED";
   if (/CAPTURE_PROVIDER_UNSUPPORTED/.test(message)) return "MEDIA_UNSUPPORTED";
+  if (/CAPTURE_DESTINATION_CHANGED/.test(message)) return "DESTINATION_CHANGED";
   if (/CAPTURE_DEVICE_UNAVAILABLE/.test(message)) return "DEVICE_UNAVAILABLE";
   if (stage === "consent") return "CAPTURE_FAILED";
+  if (stage === "generating") {
+    const status = Number(message.match(/\bfailed\s*\((\d{3})\)/i)?.[1]);
+    if (status === 401 || status === 403) return "GENERATION_AUTH_FAILED";
+    if (status === 429) return "GENERATION_RATE_LIMITED";
+    if ([400, 404, 413, 422].includes(status)) return "GENERATION_INVALID_REQUEST";
+    if (status >= 500 && status <= 599) return "GENERATION_UNAVAILABLE";
+  }
   return "GENERATION_FAILED";
 }
 
@@ -140,10 +148,18 @@ export function installCompanion(api: SpindleAPI, options: { now?: () => number;
       let text = "";
       let terminal = false;
       let lastSent = 0;
+      const gemini = connection.provider === "google" || connection.provider === "google_vertex";
+      const gemini3 = gemini && /(?:^|[/:])gemini-3(?:[.-]|$)/i.test(connection.model);
+      const reasoning: GenerationReasoningOverrideDTO = gemini3
+        ? { source: "custom", effort: "low", thinkingDisplay: "omitted" } : { source: "off" };
+      const generationRequest: GenerationRequestDTO & { type: "raw"; provider: string; model: string } = {
+        type: "raw", provider: connection.provider, model: connection.model,
+        connection_id: connection.id, userId: route.userId,
+        messages: assembleMessages(character, message.question, run.capture), parameters: { max_tokens: gemini ? 4096 : 512 },
+        tools: [], reasoning, signal: run.controller.signal,
+      };
       try {
-        for await (const chunk of api.generate.rawStream({ type: "raw", connection_id: connection.id, userId: route.userId,
-          messages: assembleMessages(character, message.question, run.capture), parameters: { max_tokens: 512 },
-          tools: [], reasoning: { source: "off" }, signal: run.controller.signal })) {
+        for await (const chunk of api.generate.rawStream(generationRequest)) {
           assertActive(run);
           if (chunk.type === "token") {
             if (text.length + chunk.token.length > MAX_REPLY) throw new DeskError("OUTPUT_LIMIT");
@@ -151,7 +167,12 @@ export function installCompanion(api: SpindleAPI, options: { now?: () => number;
             if (now() - lastSent >= 100) { send(run, { type: "text", text }); lastSent = now(); }
           } else if (chunk.type === "done") {
             if (chunk.content.length > MAX_REPLY) throw new DeskError("OUTPUT_LIMIT");
-            if (chunk.tool_calls?.length || !chunk.content.trim()) throw new DeskError("GENERATION_FAILED");
+            const finish = chunk.finish_reason?.toLowerCase();
+            if (finish === "max_tokens" || finish === "length") throw new DeskError("GENERATION_TOKEN_LIMIT");
+            if (["safety", "blocklist", "prohibited_content", "recitation"].includes(finish ?? "")) throw new DeskError("GENERATION_BLOCKED");
+            if (finish && !["stop", "end_turn", "stop_sequence", "eos"].includes(finish)) throw new DeskError("GENERATION_INCOMPLETE");
+            if (chunk.tool_calls?.length) throw new DeskError("GENERATION_FAILED");
+            if (!chunk.content.trim()) throw new DeskError("GENERATION_NO_TEXT");
             text = chunk.content.trim();
             terminal = true;
           }
@@ -160,7 +181,7 @@ export function installCompanion(api: SpindleAPI, options: { now?: () => number;
         clearTimeout(generationTimer);
       }
       assertActive(run);
-      if (!terminal) throw new DeskError("GENERATION_FAILED");
+      if (!terminal) throw new DeskError("GENERATION_INCOMPLETE");
       send(run, { type: "complete", text, characterName: safeLabel(character.name), voice: characterVoice(character.extensions),
         capture: { kind: run.capture.kind, width: run.capture.width, height: run.capture.height,
           ...(run.capture.durationSeconds === undefined ? {} : { durationSeconds: run.capture.durationSeconds }) } });

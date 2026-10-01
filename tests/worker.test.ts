@@ -5,6 +5,87 @@ import { DEFAULT_REACTION_PROMPT } from "../src/prompt";
 import { deferred, fixture, settle } from "./fixtures";
 
 describe("Desk Companion worker", () => {
+  test("binds a Gemini 3.8 video request to its explicitly approved provider and model", async () => {
+    const host = fixture(); host.connection.model = "gemini-3.8-flash";
+    const dispose = installCompanion(host.api);
+    try {
+      host.emit(host.message("video-a", { kind: "video", durationSeconds: 3 })); await settle();
+      expect(host.generations).toHaveLength(1);
+      expect(host.generations[0]).toMatchObject({ type: "raw", provider: "google", model: "gemini-3.8-flash",
+        connection_id: "model-a", parameters: { max_tokens: 4096 },
+        reasoning: { source: "custom", effort: "low", thinkingDisplay: "omitted" } });
+      expect(host.generations[0].messages[1].content[1]).toEqual({ type: "desktop_capture", asset_id: "private-asset-a" });
+      expect(host.sent.at(-1)?.payload.type).toBe("complete");
+      expect(host.released).toHaveLength(1);
+      expect(JSON.stringify(host.sent)).not.toContain("private-asset-a");
+    } finally { dispose(); }
+  });
+
+  test("preserves the small reply budget and reasoning-off policy on non-Gemini routes", async () => {
+    const host = fixture(); host.connection.provider = "openai"; host.connection.model = "vision-model";
+    const dispose = installCompanion(host.api);
+    try {
+      host.emit(host.message()); await settle();
+      expect(host.generations[0]).toMatchObject({ provider: "openai", model: "vision-model",
+        parameters: { max_tokens: 512 }, reasoning: { source: "off" } });
+      expect(host.sent.at(-1)?.payload.type).toBe("complete");
+    } finally { dispose(); }
+  });
+
+  test("reports known host/provider failures without echoing payloads or retrying a capture", async () => {
+    for (const [message, code] of [
+      ["CAPTURE_DESTINATION_CHANGED", "DESTINATION_CHANGED"],
+      ["Google Gemini stream failed (400): SECRET screen contents", "GENERATION_INVALID_REQUEST"],
+      ["Google Gemini stream failed (401): SECRET credentials", "GENERATION_AUTH_FAILED"],
+      ["Google Gemini stream failed (403): SECRET credentials", "GENERATION_AUTH_FAILED"],
+      ["Google Gemini stream failed (429): SECRET quota details", "GENERATION_RATE_LIMITED"],
+      ["Google Gemini stream failed (503): SECRET response body", "GENERATION_UNAVAILABLE"],
+      ["SECRET arbitrary provider payload", "GENERATION_FAILED"],
+    ]) {
+      const host = fixture();
+      host.mutable.generate.rawStream = async function* (input) { host.generations.push(input); throw new Error(message); };
+      const dispose = installCompanion(host.api);
+      try {
+        host.emit(host.message()); await settle();
+        expect(host.sent.at(-1)?.payload.code).toBe(code);
+        expect(host.requests).toHaveLength(1); expect(host.generations).toHaveLength(1); expect(host.released).toHaveLength(1);
+        expect(host.sent.some((entry) => entry.payload.type === "complete")).toBe(false);
+        expect(JSON.stringify(host.sent)).not.toContain("SECRET"); expect(JSON.stringify(host.sent)).not.toContain("private-asset-a");
+      } finally { dispose(); }
+    }
+  });
+
+  test("does not complete or arm speech for exhausted, blocked, incomplete, or empty replies", async () => {
+    for (const [finish, content, code] of [
+      ["MAX_TOKENS", "", "GENERATION_TOKEN_LIMIT"], ["length", "Partial reply", "GENERATION_TOKEN_LIMIT"],
+      ["SAFETY", "Partial reply", "GENERATION_BLOCKED"], ["PROHIBITED_CONTENT", "", "GENERATION_BLOCKED"],
+      ["OTHER", "Partial reply", "GENERATION_INCOMPLETE"], ["stop", " ", "GENERATION_NO_TEXT"],
+    ]) {
+      const host = fixture();
+      host.mutable.generate.rawStream = async function* (input) {
+        host.generations.push(input);
+        yield { type: "done", content, finish_reason: finish };
+      };
+      const dispose = installCompanion(host.api);
+      try {
+        host.emit(host.message()); await settle();
+        expect(host.sent.at(-1)?.payload.code).toBe(code); expect(host.released).toHaveLength(1);
+        expect(host.sent.some((entry) => entry.payload.type === "complete")).toBe(false);
+      } finally { dispose(); }
+    }
+  });
+
+  test("an interrupted stream without a done event never completes or retries", async () => {
+    const host = fixture();
+    host.mutable.generate.rawStream = async function* (input) { host.generations.push(input); yield { type: "token", token: "Partial reply" }; };
+    const dispose = installCompanion(host.api);
+    try {
+      host.emit(host.message()); await settle();
+      expect(host.sent.at(-1)?.payload.code).toBe("GENERATION_INCOMPLETE"); expect(host.generations).toHaveLength(1);
+      expect(host.released).toHaveLength(1); expect(host.sent.some((entry) => entry.payload.type === "complete")).toBe(false);
+    } finally { dispose(); }
+  });
+
   test("a blank question generates a default character reaction after approved capture", async () => {
     const host = fixture(); const dispose = installCompanion(host.api);
     try {

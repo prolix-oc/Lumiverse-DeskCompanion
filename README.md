@@ -62,6 +62,34 @@ Version 0.1.1 fixes a startup gate that incorrectly looked for the backend's `fr
 
 If upgrading from 0.1.0, publish the changed project, update the installed extension, and reload its frontend (or disable/re-enable it and refresh the desktop browser). Rebuilding the backend or the local project alone does not replace the extension bundle installed from its repository. Open the **Desk Companion** drawer tab to see startup status. Native screen-capture enablement controls capture requests, not widget registration. No backend/Tauri rebuild is needed for this extension-only fix.
 
+## Generation request troubleshooting
+
+Version 0.1.3 fixes the raw generation request's missing model/provider fields.
+A `connection_id` resolves the stored credentials and endpoint; raw generation
+still needs the explicit selected model. Capture-bound generation rejects a
+request that does not exactly match the approved model and connection, before
+any pixels reach the provider. The extension now supplies both fields from the
+owned connection fetched for the share; the host's destination checks are unchanged.
+
+Gemini requests allow a 4,096-token generation budget, including internal reasoning,
+while visible replies remain bounded to 4,000 characters and the default prompt
+still asks for a concise reaction. Gemini 3 requests use low thinking effort without
+displaying thoughts; other routes retain the reasoning-off override. A short text
+target is not the same as a thinking-inclusive token budget. This reduces empty
+responses caused by consuming a small output budget on reasoning, but does not
+guarantee completion for every provider request.
+
+Failures distinguish a changed capture destination, credential/access denial,
+quota limits, invalid provider requests, service failures, token-budget exhaustion,
+blocked responses, missing terminal completion, and empty text. Raw provider error
+bodies, credentials, screen contents, and reasoning are never echoed into widget
+state. Failed or incomplete responses do not trigger automatic TTS, and no capture
+or paid generation is retried automatically.
+
+Publish/update the installed extension and reload its frontend after upgrading;
+rebuilding only the Tauri client or backend does not replace an installed extension
+bundle. No backend/Tauri rebuild or Spindle SDK update is required for this fix.
+
 ## API integration
 
 | Feature | Implementation |

@@ -52,12 +52,14 @@ export function fixture() {
     },
     desktop: { capture: {
       async listDevices(input: any) { gets.push({ kind: "devices", userId: input.userId }); return [device]; },
-      async request(input: any) { requests.push(input); return { ...capture, kind: input.kind, durationSeconds: input.kind === "video" ? input.durationSeconds : undefined }; },
+      async request(input: any) { requests.push(input); return { ...capture, kind: input.kind, mimeType: input.kind === "video" ? "video/mp4" : capture.mimeType,
+        durationSeconds: input.kind === "video" ? input.durationSeconds : undefined }; },
       async release(assetId: string, options?: { userId?: string }) { released.push({ assetId, userId: options?.userId }); },
     } },
     generate: {
       async *rawStream(input: any): AsyncGenerator<StreamChunkDTO> {
         generations.push(input);
+        if (input.model !== connection.model || input.provider && input.provider !== connection.provider) throw new Error("CAPTURE_DESTINATION_CHANGED");
         yield { type: "reasoning", token: "private reasoning" };
         yield { type: "token", token: "You have a calendar open." };
         yield { type: "done", content: "You have a calendar open.", finish_reason: "stop" };

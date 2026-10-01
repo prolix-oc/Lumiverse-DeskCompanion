@@ -80,7 +80,9 @@ export type ServerMessage = Envelope & (
   | { type: "error"; code: ErrorCode; message: string }
 );
 
-export type ErrorCode = "INVALID_REQUEST" | "HOST_UNSUPPORTED" | "BUSY" | "COOLDOWN" | "CHARACTER_UNAVAILABLE" | "CONNECTION_UNAVAILABLE" | "DEVICE_UNAVAILABLE" | "MEDIA_UNSUPPORTED" | "PERMISSION_REQUIRED" | "CAPTURE_FAILED" | "CANCELLED" | "TIMED_OUT" | "GENERATION_FAILED" | "OUTPUT_LIMIT" | "SETTINGS_FAILED" | "SETTINGS_CHANGED";
+export type ErrorCode = "INVALID_REQUEST" | "HOST_UNSUPPORTED" | "BUSY" | "COOLDOWN" | "CHARACTER_UNAVAILABLE" | "CONNECTION_UNAVAILABLE" | "DEVICE_UNAVAILABLE" | "MEDIA_UNSUPPORTED" | "PERMISSION_REQUIRED" | "CAPTURE_FAILED" | "CANCELLED" | "TIMED_OUT" | "GENERATION_FAILED" | "OUTPUT_LIMIT" | "SETTINGS_FAILED" | "SETTINGS_CHANGED"
+  | "DESTINATION_CHANGED" | "GENERATION_AUTH_FAILED" | "GENERATION_RATE_LIMITED" | "GENERATION_INVALID_REQUEST" | "GENERATION_UNAVAILABLE"
+  | "GENERATION_TOKEN_LIMIT" | "GENERATION_BLOCKED" | "GENERATION_INCOMPLETE" | "GENERATION_NO_TEXT";
 
 export const ERROR_MESSAGES: Record<ErrorCode, string> = {
   SETTINGS_FAILED: "Companion settings could not be loaded or saved. Refresh before sharing; no capture was requested.",
@@ -97,7 +99,16 @@ export const ERROR_MESSAGES: Record<ErrorCode, string> = {
   CAPTURE_FAILED: "The capture was declined, expired, or could not be prepared. Nothing was sent to a model; refresh and try again.",
   CANCELLED: "Observation cancelled. If the native capture panel is still open, use its Stop & Discard control.",
   TIMED_OUT: "The observation timed out. If the native capture panel is still open, use Stop & Discard.",
-  GENERATION_FAILED: "The model request could not finish. Check that the selected model supports the capture type.",
+  GENERATION_FAILED: "The model request did not complete successfully. Check the selected connection and provider status; this does not necessarily mean the capture type is unsupported.",
+  DESTINATION_CHANGED: "The generation request did not match the model and connection approved for this capture. Refresh settings and share a new capture.",
+  GENERATION_AUTH_FAILED: "The model provider rejected the connection's credentials or model access. Check the API key and permissions for the selected connection.",
+  GENERATION_RATE_LIMITED: "The model provider rate-limited this request. Check its quota or billing and try again later; the capture is not retried automatically.",
+  GENERATION_INVALID_REQUEST: "The model provider rejected the request. Check the selected model, endpoint, generation parameters, and media size rather than assuming video is unsupported.",
+  GENERATION_UNAVAILABLE: "The model provider could not serve this request. Check its service status and try again later; no automatic retry is performed.",
+  GENERATION_TOKEN_LIMIT: "The model exhausted its generation token budget before finishing a reply, which can include internal reasoning. No incomplete reply will be spoken automatically.",
+  GENERATION_BLOCKED: "The model provider blocked this response. No incomplete reply will be spoken automatically.",
+  GENERATION_INCOMPLETE: "The model response ended without a successful completion. Check the provider or proxy connection and try again later.",
+  GENERATION_NO_TEXT: "The model completed without returning readable reply text. Check the provider response before treating this as a media-support problem.",
   OUTPUT_LIMIT: "The model reply exceeded the demo's output limit and was stopped.",
 };
 
