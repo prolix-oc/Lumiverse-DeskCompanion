@@ -45,4 +45,21 @@ describe("Spindle TTS playback", () => {
     await expect(speakReply("Hello", "voice-a", new AbortController().signal, api)).rejects.toThrow("Speech could not play");
     expect(calls).toBe(1);
   });
+
+  test("distinguishes actionable host failures without exposing provider messages", async () => {
+    for (const [failure, expected] of [
+      [new Error("PERMISSION_DENIED:media:PRIVATE_DETAILS"), "Allow Desk Companion's Media permission"],
+      [new Error("TTS_CONNECTION_NOT_FOUND:PRIVATE_DETAILS"), "Choose an available TTS connection"],
+      [new Error("TTS_UNAVAILABLE:connectionRequired"), "Choose an available TTS connection"],
+      [new Error("TTS_UNAVAILABLE:disabled"), "independently of chat TTS"],
+      [new DOMException("PRIVATE_DETAILS", "NotAllowedError"), "Audio playback was blocked"],
+    ] as const) {
+      const api = { speak: async () => { throw failure; }, subscribe: () => () => {} } as unknown as SpindleTTSAPI;
+      let caught: unknown;
+      try { await speakReply("Hello", "voice-a", new AbortController().signal, api); } catch (error) { caught = error; }
+      expect(caught).toBeInstanceOf(Error);
+      expect((caught as Error).message).toContain(expected);
+      expect((caught as Error).message).not.toContain("PRIVATE_DETAILS");
+    }
+  });
 });

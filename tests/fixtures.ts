@@ -36,6 +36,7 @@ export function fixture() {
   const unregisteredCommands: string[][] = [];
   const toasts: Array<{ message: string; userId?: string }> = [];
   const approvalQueries: any[] = [];
+  const finished: any[] = [];
   let commandHandler: (id: string, context: any, origin?: { userId: string; frontendSessionId?: string }) => void | Promise<void> = () => {};
   let handler: (payload: unknown, userId: string, frontendSessionId?: string) => void = () => {};
   const api = {
@@ -67,6 +68,7 @@ export function fixture() {
       async request(input: any) { requests.push(input); return { ...capture, kind: input.kind, mimeType: input.kind === "video" ? "video/mp4" : capture.mimeType,
         durationSeconds: input.kind === "video" ? input.durationSeconds : undefined }; },
       async release(assetId: string, options?: { userId?: string }) { released.push({ assetId, userId: options?.userId }); },
+      async finish(requestKey: string, options: { userId: string }) { finished.push({ requestKey, ...options }); return true; },
     } },
     generate: {
       async *rawStream(input: any): AsyncGenerator<StreamChunkDTO> {
@@ -80,7 +82,7 @@ export function fixture() {
   };
   const message = (id = "request-a", overrides: Record<string, unknown> = {}) => ({ channel: CHANNEL, id, clientId: "client-a", type: "observe",
     characterId: "character-a", connectionId: "model-a", deviceId: "desktop-a", kind: "image", durationSeconds: 3, question: "What do you notice?", ...overrides });
-  return { api: api as unknown as SpindleAPI, mutable: api, now, capture, connection, device, sent, gets, requests, generations, released, events, stored, message, registeredCommands, unregisteredCommands, toasts, approvalQueries,
+  return { api: api as unknown as SpindleAPI, mutable: api, now, capture, connection, device, sent, gets, requests, generations, released, events, stored, message, registeredCommands, unregisteredCommands, toasts, approvalQueries, finished,
     invoke: (id = "share-screen", userId = "user-a", frontendSessionId: string | undefined = "session-b") => commandHandler(id, { route: "/", trigger: { type: "keybind", bindingId: "configured", scope: "global" } }, { userId, frontendSessionId }),
     emit(payload: unknown, userId = "user-a", sessionId: string | undefined = "session-a") { handler(payload, userId, sessionId); } };
 }

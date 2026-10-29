@@ -24,7 +24,8 @@ function owns(state: UserState, route: Route): boolean {
   return state.owner?.frontendSessionId === route.frontendSessionId && state.owner.clientId === route.clientId && state.owner.id === route.id;
 }
 
-export function createCompanionState(api: SpindleAPI, cancelRun: (route: Route) => void, checkBegin: (route: Route) => void) {
+export function createCompanionState(api: SpindleAPI, cancelRun: (route: Route) => void, checkBegin: (route: Route) => void,
+  history?: { trim(userId: string, characterId: string, limit: number): Promise<void>; clear(userId: string, characterId: string): Promise<void> }) {
   const users = new Map<string, Promise<UserState>>();
   const resolved = new Map<string, UserState>();
   const pendingSessions = new Map<string, { count: number; closed: boolean }>();
@@ -133,6 +134,9 @@ export function createCompanionState(api: SpindleAPI, cancelRun: (route: Route) 
         if (state.activity.stage !== "idle") throw new DeskError("BUSY");
         const settings = { ...state.settings, ...message.patch };
         const revision = state.revision + 1;
+        if (settings.historyTurns !== state.settings.historyTurns || settings.characterId !== state.settings.characterId) {
+          await history?.trim(route.userId, settings.characterId, settings.historyTurns);
+        }
         await api.userStorage.setJson(SETTINGS_PATH, { revision, settings }, { userId: route.userId });
         if (disposed) return;
         state.settings = settings; state.revision = revision;
@@ -157,8 +161,9 @@ export function createCompanionState(api: SpindleAPI, cancelRun: (route: Route) 
         if (state.activity.requestId === message.targetId) cancel(state);
       } else if (message.type === "clear-state") {
         cancel(state); stopLocal(state, true);
+        await history?.clear(route.userId, state.settings.characterId);
         state.activity.text = ""; state.activity.voice = null; state.activity.characterName = "A fresh perspective";
-        broadcast(state);
+        broadcast(state, route);
       } else if (message.type === "stop-speech") { stopLocal(state, true); broadcast(state); }
       else if (message.type === "speech-stage") {
         if (state.activity.stage !== "idle" || !state.activity.text || state.activity.requestId !== message.targetId) return;
@@ -182,8 +187,10 @@ export function createCompanionState(api: SpindleAPI, cancelRun: (route: Route) 
     try { await operation; return true; } finally { state.queued -= 1; }
   }
 
-  async function beforeObserve(message: Extract<ClientMessage, { type: "observe" }>, route: Route): Promise<void> {
+  async function beforeObserve(message: Extract<ClientMessage, { type: "observe" }>, route: Route): Promise<CompanionSettings> {
     const state = await load(route.userId);
+    await state.queue.catch(() => {});
+    if (disposed) throw new DeskError("CANCELLED");
     if (state.activity.stage !== "idle" && !owns(state, route)) throw new DeskError("BUSY");
     if (state.activity.stage !== "idle" && state.frozen) {
       for (const key of ["characterId", "connectionId", "deviceId", "kind", "durationSeconds"] as const) {
@@ -192,6 +199,7 @@ export function createCompanionState(api: SpindleAPI, cancelRun: (route: Route) 
     } else claim(state, route);
     state.capturing = true;
     broadcast(state);
+    return { ...(state.frozen ?? state.settings) };
   }
 
   function publish(route: Route, body: ResponseBody): void {
@@ -199,14 +207,15 @@ export function createCompanionState(api: SpindleAPI, cancelRun: (route: Route) 
     if (!state || !owns(state, route) || state.activity.stage === "idle") return;
     if (body.type === "status") {
       state.activity.stage = body.stage;
-      state.activity.message = body.stage === "consent" ? CAPTURE_PENDING
+      state.activity.canFinish = body.stage === "consent" && body.canFinish === true;
+      state.activity.message = body.message ?? (body.stage === "consent" ? CAPTURE_PENDING
         : body.stage === "generating" ? "Your character is reacting to the approved capture…"
-        : body.stage === "cancelling" ? "Cancelling. Use Stop & Discard in any native capture panel still open." : "Checking character, model, and desktop…";
+        : body.stage === "cancelling" ? "Cancelling. Use Stop & Discard in any native capture panel still open." : "Checking character, model, and desktop…");
     } else if (body.type === "text") state.activity.text = body.text;
     else if (body.type === "complete") {
-      release(state); state.activity.stage = "idle"; state.activity.text = body.text;
+      release(state); state.activity.stage = "idle"; state.activity.canFinish = false; state.activity.text = body.text;
       state.activity.characterName = body.characterName; state.activity.voice = body.voice;
-      state.activity.message = `Answered using one approved ${body.capture.kind}: ${body.capture.width} × ${body.capture.height}.`;
+      state.activity.message = body.historyWarning ?? `Answered using one approved ${body.capture.kind}: ${body.capture.width} × ${body.capture.height}.`;
     } else if (body.type === "error") {
       release(state); state.activity = { ...idleActivity(), requestId: route.id, ownerClientId: route.clientId, message: body.message, error: true };
     } else return;

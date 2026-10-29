@@ -1,8 +1,23 @@
 import { describe, expect, test } from "bun:test";
-import { assembleMessages, DEFAULT_REACTION_PROMPT } from "../src/prompt";
+import { assembleMessages, DEFAULT_REACTION_PROMPT, GEMINI_SYSTEM_INSTRUCTION } from "../src/prompt";
 import { CHARACTER, fixture } from "./fixtures";
 
 describe("character-driven companion prompt", () => {
+  test("appends the editable instruction only for Gemini model IDs", () => {
+    const capture = fixture().capture;
+    const base = assembleMessages(CHARACTER, "What do you notice?", capture);
+    for (const model of ["gemini-2.5-flash", "GEMINI-3.8-FLASH", "google/gemini-2.5-pro",
+      "models/gemini-2.5-flash", "projects/example/locations/us/publishers/google/models/gemini-2.5-pro",
+      " gemini-2.5-flash "]) {
+      const messages = assembleMessages(CHARACTER, "What do you notice?", capture, model);
+      expect(messages[0]).toEqual({ role: "system", content: `${base[0].content}\n\n${GEMINI_SYSTEM_INSTRUCTION}` });
+      expect(messages.slice(1)).toEqual(base.slice(1));
+    }
+    for (const model of ["", "glm-5.3-flash", "claude-sonnet-4-6", "gpt-4.1", "geminilike-model", "custom-gemini-model"]) {
+      expect(assembleMessages(CHARACTER, "What do you notice?", capture, model)).toEqual(base);
+    }
+  });
+
   test("adapts card voice and example turns independently for different installed characters", () => {
     for (const [name, personality, reply] of [
       ["Lumen", "An exuberant idol who speaks with playful excitement.", "Eee, you made it! Showtime~!"],
@@ -31,6 +46,36 @@ describe("character-driven companion prompt", () => {
       { role: "user", content: "Greet me in your own voice." }, { role: "assistant", content: "Well met, traveler." },
     ]);
     expect(assembleMessages({ ...card, first_mes: "" }, "", fixture().capture)).toHaveLength(2);
+  });
+
+  test("uses spoken card examples without modeling stage directions or scene narration", () => {
+    for (const [name, personality, dialogue] of [["Lumen", "Exuberant and playful", "Eee, that's *so* exciting!"],
+      ["Dr. Vale", "Reserved and precise", "An interesting result. Proceed."]]) {
+      const spoken = dialogue.replace(/\*/g, "");
+      const card = { ...CHARACTER, name, personality, first_mes: '*Walks into the room.* "Welcome back."',
+        mes_example: `<START>\n{{user}}: "What do you think?"\n{{char}}: *Leans over your shoulder.*\n"${dialogue}"\n*Points at the screen.*` };
+      const question = 'Look at "this" and explain *that*.';
+      const messages = assembleMessages(card, question, fixture().capture);
+      expect(messages.slice(1, -1)).toEqual([
+        { role: "user", content: "What do you think?" }, { role: "assistant", content: spoken },
+      ]);
+      expect(String(messages[0].content)).toContain(`Personality:\n${personality}`);
+      expect(String(messages[0].content)).toContain("Output only the words the character would say aloud");
+      expect(String(messages[0].content)).toContain("format rules take priority over roleplay formatting");
+      expect(messages.at(-1)!.content).toEqual([
+        { type: "text", text: question }, { type: "desktop_capture", asset_id: "private-asset-a" },
+      ]);
+    }
+  });
+
+  test("uses spoken greetings and skips examples containing only stage directions", () => {
+    const card = { ...CHARACTER, mes_example: "", first_mes: '*Waves at you.* “Well met, traveler.” *Sits down.*' };
+    expect(assembleMessages(card, "", fixture().capture).slice(1, -1)).toEqual([
+      { role: "user", content: "Greet me in your own voice." }, { role: "assistant", content: "Well met, traveler." },
+    ]);
+    expect(assembleMessages({ ...card, first_mes: "*Sits down.*", mes_example: "<START>\n{{user}}: Ready?\n{{char}}: *Nods.*" }, "", fixture().capture)).toHaveLength(2);
+    expect(assembleMessages({ ...card, first_mes: '*Waves.* "Welcome back,\nmy friend!"' }, "", fixture().capture)[2].content).toBe("Welcome back, my friend!");
+    expect(assembleMessages({ ...card, first_mes: '*Waves.* Welcome back!' }, "", fixture().capture)[2].content).toBe("Welcome back!");
   });
 
   test("bounds example pairs and discards incomplete dialogue before the real user request", () => {

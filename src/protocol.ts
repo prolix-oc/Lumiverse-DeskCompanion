@@ -41,6 +41,7 @@ export interface DeviceOption {
   nativeDeviceId?: string;
   displayId?: string;
   stableIdentity?: boolean;
+  recordingControlSupported?: boolean;
   name: string;
   platform: string;
   image: boolean;
@@ -78,6 +79,7 @@ export type ClientMessage = Envelope & (
   | { type: "approval"; deviceId: string; connectionId: string; kind: "image" | "video" }
   | { type: "observe"; characterId: string; connectionId: string; deviceId: string; question: string; kind: "image" | "video"; durationSeconds: number }
   | { type: "cancel"; targetId: string }
+  | { type: "finish-capture"; targetId: string }
 );
 
 export type ServerMessage = Envelope & (
@@ -89,17 +91,18 @@ export type ServerMessage = Envelope & (
   | { type: "devices"; devices: DeviceOption[] }
   | { type: "approval"; status: DesktopCaptureApprovalStatus }
   | { type: "shortcut"; skipVoice: boolean }
-  | { type: "status"; stage: "checking" | "consent" | "generating" | "cancelling" }
+  | { type: "status"; stage: "checking" | "consent" | "generating" | "cancelling"; canFinish?: boolean; message?: string }
   | { type: "text"; text: string }
-  | { type: "complete"; text: string; characterName: string; voice: VoiceRef | null; capture: { kind: "image" | "video"; width: number; height: number; durationSeconds?: number } }
+  | { type: "complete"; text: string; characterName: string; voice: VoiceRef | null; historyWarning?: string; capture: { kind: "image" | "video"; width: number; height: number; durationSeconds?: number } }
   | { type: "error"; code: ErrorCode; message: string }
 );
 
-export type ErrorCode = "SESSION_REQUIRED" | "INVALID_REQUEST" | "HOST_UNSUPPORTED" | "BUSY" | "COOLDOWN" | "CHARACTER_UNAVAILABLE" | "CONNECTION_UNAVAILABLE" | "DEVICE_UNAVAILABLE" | "MEDIA_UNSUPPORTED" | "PERMISSION_REQUIRED" | "CAPTURE_FAILED" | "CANCELLED" | "TIMED_OUT" | "GENERATION_FAILED" | "OUTPUT_LIMIT" | "SETTINGS_FAILED" | "SETTINGS_CHANGED"
+export type ErrorCode = "SESSION_REQUIRED" | "INVALID_REQUEST" | "HOST_UNSUPPORTED" | "BUSY" | "COOLDOWN" | "CHARACTER_UNAVAILABLE" | "CONNECTION_UNAVAILABLE" | "DEVICE_UNAVAILABLE" | "MEDIA_UNSUPPORTED" | "PERMISSION_REQUIRED" | "CAPTURE_FAILED" | "CANCELLED" | "TIMED_OUT" | "GENERATION_FAILED" | "OUTPUT_LIMIT" | "SETTINGS_FAILED" | "SETTINGS_CHANGED" | "HISTORY_FAILED"
   | "DESTINATION_CHANGED" | "GENERATION_AUTH_FAILED" | "GENERATION_RATE_LIMITED" | "GENERATION_INVALID_REQUEST" | "GENERATION_UNAVAILABLE"
   | "GENERATION_TOKEN_LIMIT" | "GENERATION_BLOCKED" | "GENERATION_INCOMPLETE" | "GENERATION_NO_TEXT";
 
 export const ERROR_MESSAGES: Record<ErrorCode, string> = {
+  HISTORY_FAILED: "Conversation history could not be loaded or saved. Check extension storage, clear this character's history, or set history to 0 before sharing again.",
   SESSION_REQUIRED: "Desk Companion needs to reconnect before saving or sharing. Refresh to reconnect.",
   SETTINGS_FAILED: "Companion settings could not be loaded or saved. Refresh before sharing; no capture was requested.",
   SETTINGS_CHANGED: "Companion settings changed in another window. Review the updated settings, then share again.",
@@ -172,6 +175,7 @@ export function parseClientMessage(value: unknown): ClientMessage | null {
     return { ...envelope, type: "input-ended", targetId: value.targetId, message: value.message };
   }
   if (value.type === "cancel" && identifier(value.targetId)) return { ...envelope, type: "cancel", targetId: value.targetId };
+  if (value.type === "finish-capture" && identifier(value.targetId)) return { ...envelope, type: "finish-capture", targetId: value.targetId };
   if (value.type === "characters" && Number.isSafeInteger(value.offset) && Number(value.offset) >= 0 && Number(value.offset) <= 500000
     && typeof value.search === "string" && value.search.length <= 200) {
     return { ...envelope, type: "characters", offset: Number(value.offset), search: value.search.trim() };
@@ -183,7 +187,7 @@ export function parseClientMessage(value: unknown): ClientMessage | null {
   if (value.type !== "observe" || !identifier(value.characterId) || !identifier(value.connectionId) || !identifier(value.deviceId)
     || typeof value.question !== "string" || value.question.length > MAX_QUESTION
     || !["image", "video"].includes(String(value.kind)) || !Number.isInteger(value.durationSeconds)
-    || Number(value.durationSeconds) < 1 || Number(value.durationSeconds) > 30) return null;
+    || Number(value.durationSeconds) < 1 || Number(value.durationSeconds) > 120) return null;
   return { ...envelope, type: "observe", characterId: value.characterId, connectionId: value.connectionId,
     deviceId: value.deviceId, question: value.question.trim(), kind: value.kind as "image" | "video", durationSeconds: Number(value.durationSeconds) };
 }

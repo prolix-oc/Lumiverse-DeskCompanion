@@ -1,10 +1,52 @@
 import { describe, expect, test } from "bun:test";
 import { CHANNEL, MAX_REPLY } from "../src/protocol";
 import { installCompanion } from "../src/worker";
-import { DEFAULT_REACTION_PROMPT } from "../src/prompt";
+import { DEFAULT_REACTION_PROMPT, GEMINI_SYSTEM_INSTRUCTION } from "../src/prompt";
 import { deferred, fixture, settle } from "./fixtures";
 
 describe("Desk Companion worker", () => {
+  test("sends an optional media detail override only to native Gemini routes", async () => {
+    for (const [provider, model, mediaResolution, expected] of [
+      ["google", "gemini-3.8-flash", "high", true],
+      ["google_vertex", "publishers/google/models/gemini-2.5-flash", "low", true],
+      ["google", "gemini-3.8-flash", "inherit", false],
+      ["google", "gemini-3.8-flash", "unspecified", true],
+      ["openrouter", "google/gemini-3.8-flash", "high", false],
+      ["zai", "glm-5.3-flash", "high", false],
+    ] as const) {
+      const host = fixture(); host.connection.provider = provider; host.connection.model = model;
+      const dispose = installCompanion(host.api);
+      try {
+        host.emit({ channel: CHANNEL, clientId: "client-a", id: "subscribe-a", type: "subscribe", surface: "settings" });
+        await settle();
+        host.emit({ channel: CHANNEL, clientId: "client-a", id: "settings-a", type: "configure", patch: { mediaResolution } });
+        await settle(); host.emit(host.message()); await settle();
+        expect(host.generations).toHaveLength(1);
+        expect(host.generations[0].parameters).toEqual(expected ? { media_resolution: mediaResolution } : undefined);
+        expect(host.generations[0].reasoning).toEqual({ source: "inherit" });
+      } finally { dispose(); }
+    }
+  });
+
+  test("finishing is bound to the active request's account, document and client, and repeated presses finalize only once", async () => {
+    const host = fixture(); const capture = deferred<typeof host.capture>();
+    Object.assign(host.mutable.host.capabilities, { "desktop-capture-finish-v1": 1 });
+    Object.assign(host.device, { recordingControlSupported: true });
+    host.mutable.desktop.capture.request = async input => { host.requests.push(input); return capture.promise; };
+    const dispose = installCompanion(host.api);
+    try {
+      host.emit(host.message("video", { kind: "video" })); await settle();
+      const finish = host.message("finish", { type: "finish-capture", targetId: "video" });
+      host.emit(finish, "user-b", "session-a"); host.emit(finish, "user-a", "other-document");
+      host.emit({ ...finish, clientId: "other-client" }); host.emit({ ...finish, targetId: "another-request" }); await settle();
+      expect(host.finished).toHaveLength(0);
+      host.emit(finish); host.emit(finish); await host.invoke("share-screen", "user-a", "session-a"); await settle();
+      expect(host.finished).toEqual([{ requestKey: "video", userId: "user-a" }]);
+      expect(host.requests).toHaveLength(1);
+      capture.resolve({ ...host.capture, kind: "video", mimeType: "video/mp4", durationSeconds: 1 }); await settle();
+      host.emit(finish); await settle(); expect(host.finished).toHaveLength(1);
+    } finally { dispose(); capture.resolve(host.capture); }
+  });
   test("a disconnected saved display cannot become a generic desktop capture", async () => {
     const host = fixture();
     Object.assign(host.device, { displays: [{ id: "a".repeat(64), name: "Display 1", width: 1920, height: 1080, primary: true }] });
@@ -110,14 +152,16 @@ describe("Desk Companion worker", () => {
   });
 
   test("inherits reasoning for every provider without forcing thinking or a token budget", async () => {
-    for (const [provider, model] of [["openai", "vision-model"], ["google", "gemini-3.8-flash"],
-      ["google_vertex", "gemini-2.5-flash"], ["zai", "glm-5.3-flash"], ["anthropic", "claude-sonnet-4-6"]]) {
+    for (const [provider, model, gemini] of [["openai", "vision-model", false], ["google", "gemini-3.8-flash", true],
+      ["google_vertex", "publishers/google/models/gemini-2.5-flash", true], ["openrouter", "google/gemini-2.5-pro", true],
+      ["openai", "gemini-2.5-flash", true], ["zai", "glm-5.3-flash", false], ["anthropic", "claude-sonnet-4-6", false]] as const) {
       const host = fixture(); host.connection.provider = provider; host.connection.model = model;
       const dispose = installCompanion(host.api);
       try {
         host.emit(host.message()); await settle();
         expect(host.generations[0]).toMatchObject({ provider, model, reasoning: { source: "inherit" } });
         expect(host.generations[0].parameters).toBeUndefined();
+        expect(String(host.generations[0].messages[0].content).endsWith(`\n\n${GEMINI_SYSTEM_INSTRUCTION}`)).toBe(gemini);
         expect(host.sent.at(-1)?.payload.type).toBe("complete");
       } finally { dispose(); }
     }

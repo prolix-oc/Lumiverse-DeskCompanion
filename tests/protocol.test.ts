@@ -9,7 +9,7 @@ describe("request and character boundaries", () => {
   const input = { channel: CHANNEL, id: "request-a", clientId: "client-a", type: "observe", characterId: "character-a",
     connectionId: "model-a", deviceId: "desktop-a", question: "What is visible?", kind: "image", durationSeconds: 3 };
   test("rejects malformed, unbounded, and replay requests", () => {
-    for (const change of [{ question: undefined }, { question: null }, { question: 42 }, { question: "x".repeat(1201) }, { durationSeconds: 0 }, { durationSeconds: 31 },
+    for (const change of [{ question: undefined }, { question: null }, { question: 42 }, { question: "x".repeat(1201) }, { durationSeconds: 0 }, { durationSeconds: 121 },
       { durationSeconds: 1.5 }, { kind: "replay" }, { clientId: {} }, { connectionId: "../secret" }, { channel: "other" }]) {
       expect(parseClientMessage({ ...input, ...change })).toBeNull();
     }

@@ -55,7 +55,7 @@ export function mountSharedFields(ctx: SpindleFrontendContext, root: HTMLElement
       } else if (control.tagName === "INPUT" && (control as HTMLInputElement).type === "number" && components?.mountNumericInput) {
         const input = control as HTMLInputElement;
         binding = bindField(() => ({ value: input.value === "" ? null : Number(input.value), disabled: input.disabled }),
-          options => components.mountNumericInput(target, { ...options, ariaLabel, min: Number(input.min), max: Number(input.max), step: 1, integer: true, onChange: emit }));
+          options => components.mountNumericInput(target, { ...options, ariaLabel, min: input.min ? Number(input.min) : undefined, max: input.max ? Number(input.max) : undefined, step: 1, integer: true, onChange: emit }));
       } else if (control.tagName === "INPUT" && (control as HTMLInputElement).type === "checkbox" && components?.mountSwitch) {
         const input = control as HTMLInputElement;
         binding = bindField(() => ({ checked: input.checked, disabled: input.disabled }),

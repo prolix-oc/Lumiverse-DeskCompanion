@@ -7,6 +7,8 @@ export interface CompanionSettings {
   deviceId: string;
   kind: "image" | "video";
   durationSeconds: number;
+  historyTurns: number;
+  mediaResolution: "inherit" | "unspecified" | "low" | "medium" | "high";
   question: string;
   autoSpeak: boolean;
   voiceInput: boolean;
@@ -18,7 +20,8 @@ export interface CompanionSettings {
 }
 
 export const DEFAULT_SETTINGS: Readonly<CompanionSettings> = Object.freeze({
-  characterId: "", connectionId: "", deviceId: "", kind: "image", durationSeconds: 3,
+  characterId: "", connectionId: "", deviceId: "", kind: "image", durationSeconds: 3, historyTurns: 5,
+  mediaResolution: "inherit",
   question: "", autoSpeak: false, voiceInput: false, sttProvider: "connection", sttId: "",
   ttsId: "", voice: "", speed: 1,
 });
@@ -36,6 +39,7 @@ export interface CompanionActivity {
   error: boolean;
   speechStage: "idle" | "synthesizing" | "ready" | "playing";
   speechClientId: string | null;
+  canFinish: boolean;
 }
 
 export interface CompanionSnapshot {
@@ -50,7 +54,7 @@ export interface CompanionSnapshot {
 export function idleActivity(): CompanionActivity {
   return { requestId: null, ownerClientId: null, stage: "idle", text: "", characterName: "A fresh perspective", voice: null,
     message: "", error: false,
-    speechStage: "idle", speechClientId: null };
+    speechStage: "idle", speechClientId: null, canFinish: false };
 }
 
 export function parseSettingsPatch(value: unknown): Partial<CompanionSettings> | null {
@@ -64,12 +68,16 @@ export function parseSettingsPatch(value: unknown): Partial<CompanionSettings> |
       if (setting !== "image" && setting !== "video") return null;
     } else if (key === "sttProvider") {
       if (setting !== "connection" && setting !== "whistle" && setting !== "webspeech") return null;
+    } else if (key === "mediaResolution") {
+      if (typeof setting !== "string" || !["inherit", "unspecified", "low", "medium", "high"].includes(setting)) return null;
     } else if (key === "autoSpeak" || key === "voiceInput") {
       if (typeof setting !== "boolean") return null;
     } else if (key === "question" || key === "voice") {
       if (typeof setting !== "string" || setting.length > (key === "question" ? MAX_QUESTION : 256)) return null;
+    } else if (key === "historyTurns") {
+      if (!Number.isSafeInteger(setting) || Number(setting) < 0) return null;
     } else if (typeof setting !== "number" || !Number.isFinite(setting)
-      || (key === "speed" ? setting < 0.25 || setting > 4 : !Number.isInteger(setting) || setting < 1 || setting > 30)) return null;
+      || (key === "speed" ? setting < 0.25 || setting > 4 : !Number.isInteger(setting) || setting < 1 || setting > 120)) return null;
     patch[key] = setting;
   }
   return patch;
@@ -84,6 +92,12 @@ export function parseSettings(value: unknown): CompanionSettings | null {
     delete normalized.voiceSeconds;
   }
   if (!Object.hasOwn(normalized, "sttProvider")) normalized.sttProvider = "connection";
+  if (!Object.hasOwn(normalized, "historyTurns")) normalized.historyTurns = DEFAULT_SETTINGS.historyTurns;
+  if (!Object.hasOwn(normalized, "mediaResolution")) normalized.mediaResolution = DEFAULT_SETTINGS.mediaResolution;
   const patch = parseSettingsPatch(normalized);
   return patch && Object.keys(patch).length === Object.keys(DEFAULT_SETTINGS).length ? { ...DEFAULT_SETTINGS, ...patch } : null;
+}
+
+export function supportsGeminiMediaResolution(provider: string, model: string): boolean {
+  return ["google", "google_vertex"].includes(provider) && /(?:^|\/)gemini(?:[-/]|$)/i.test(model.trim());
 }

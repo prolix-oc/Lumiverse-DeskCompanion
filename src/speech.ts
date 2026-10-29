@@ -23,6 +23,17 @@ export async function listSpeechConnections(ctx: SpindleFrontendContext, signal:
     .map((entry) => ({ id: entry.id, name: safeLabel(entry.name), provider: safeLabel(entry.provider), voice: (entry.voice ?? "").slice(0, 256) }));
 }
 
+function speechFailure(error: unknown): Error {
+  const message = error instanceof Error ? error.message : "";
+  if (message.startsWith("PERMISSION_DENIED:media")) return new Error("Allow Desk Companion's Media permission in Extensions to play speech.");
+  if (message.startsWith("TTS_UNAVAILABLE:disabled")) return new Error("Update Lumiverse to let Desk Companion use its own Spoken replies setting independently of chat TTS.");
+  if (message.startsWith("TTS_CONNECTION_NOT_FOUND") || message.startsWith("TTS_UNAVAILABLE:connectionRequired")) {
+    return new Error("Choose an available TTS connection in Desk Companion's Speech settings.");
+  }
+  if (error instanceof Error && error.name === "NotAllowedError") return new Error("Audio playback was blocked in this window. Click Speak reply to try again.");
+  return new Error("Speech could not play. Check the selected TTS connection in Desk Companion's Speech settings.");
+}
+
 export async function speakReply(text: string, connectionId: string, signal: AbortSignal, api?: SpindleTTSAPI,
   onSpeaking?: (speaking: boolean) => void): Promise<void> {
   if (signal.aborted) throw new DOMException("Aborted", "AbortError");
@@ -38,7 +49,7 @@ export async function speakReply(text: string, connectionId: string, signal: Abo
     if (signal.aborted) throw new DOMException("Aborted", "AbortError");
   } catch (error) {
     if (signal.aborted || error instanceof Error && error.name === "AbortError") throw new DOMException("Aborted", "AbortError");
-    throw new Error("Speech could not play. Check Media permission, enable TTS in Voice & Speech, and check the selected connection.");
+    throw speechFailure(error);
   } finally {
     signal.removeEventListener("abort", cancel);
     unsubscribe();

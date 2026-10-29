@@ -1,5 +1,7 @@
 import type { CapturedMediaRef, CharacterDTO, GenerationRequestDTO, SpindleAPI } from "lumiverse-spindle-types";
-import { assembleMessages } from "./prompt";
+import { assembleMessages, DEFAULT_REACTION_PROMPT } from "./prompt";
+import { createHistory } from "./history";
+import { supportsGeminiMediaResolution } from "./settings";
 import { captureTargets } from "./capture-targets";
 import { CHANNEL, CHARACTER_PAGE_SIZE, DeskError, ERROR_MESSAGES, MAX_REPLY, characterVoice, mediaSupport, parseClientMessage, record, safeLabel } from "./protocol";
 import type { Catalog, CharacterOption, ClientMessage, DeviceOption, ErrorCode, ServerMessage } from "./protocol";
@@ -18,6 +20,8 @@ interface Run extends Route {
   controller: AbortController;
   timedOut: boolean;
   capture: CapturedMediaRef | null;
+  captureKey: string | null;
+  finishRequested: boolean;
 }
 
 type Observe = Extract<ClientMessage, { type: "observe" }>;
@@ -52,6 +56,11 @@ export function installCompanion(api: SpindleAPI, options: { now?: () => number;
   const lastCapture = new Map<string, number>();
   const catalogJobs = new Set<string>();
   let disposed = false;
+  const history = createHistory(api);
+  // Optional until the installed SDK and host both expose early finalization.
+  const captureControl = api.desktop?.capture as (typeof api.desktop.capture & {
+    finish?: (requestKey: string, options: { userId: string }) => Promise<boolean>;
+  }) | undefined;
   const sharedState = createCompanionState(api, (route) => {
     const run = active.get(route.userId);
     if (run?.id === route.id && run.clientId === route.clientId && run.frontendSessionId === route.frontendSessionId) run.controller.abort();
@@ -59,7 +68,7 @@ export function installCompanion(api: SpindleAPI, options: { now?: () => number;
     if (!compatible()) throw new DeskError("HOST_UNSUPPORTED");
     if (active.has(route.userId) || active.size >= 8) throw new DeskError("BUSY");
     if (lastCapture.has(route.userId) && now() - lastCapture.get(route.userId)! < 10000) throw new DeskError("COOLDOWN");
-  });
+  }, history);
 
   function send(route: Route, body: ResponseBody): void {
     if (!disposed) {
@@ -143,12 +152,12 @@ export function installCompanion(api: SpindleAPI, options: { now?: () => number;
     for (const [userId, timestamp] of lastCapture) if (now() - timestamp > 300000) lastCapture.delete(userId);
     if (lastCapture.has(route.userId) && now() - lastCapture.get(route.userId)! < 10000) { failure(route, "COOLDOWN"); return; }
     if (lastCapture.size >= 1024 && !lastCapture.has(route.userId)) { failure(route, "BUSY"); return; }
-    const run: Run = { ...route, controller: new AbortController(), timedOut: false, capture: null };
+    const run: Run = { ...route, controller: new AbortController(), timedOut: false, capture: null, captureKey: null, finishRequested: false };
     active.set(route.userId, run);
-    const timer = setTimeout(() => { run.timedOut = true; run.controller.abort(); }, options.timeoutMs ?? 240000);
+    const timer = setTimeout(() => { run.timedOut = true; run.controller.abort(); }, options.timeoutMs ?? 420000);
     let stage: "checking" | "consent" | "generating" = "checking";
     try {
-      await sharedState.beforeObserve(message, route);
+      const settings = await sharedState.beforeObserve(message, route);
       assertActive(run);
       send(run, { type: "status", stage });
       const [character, connection, devices] = await Promise.all([
@@ -163,13 +172,20 @@ export function installCompanion(api: SpindleAPI, options: { now?: () => number;
       if (!device) throw new DeskError("DEVICE_UNAVAILABLE");
       const support = mediaSupport(connection.provider, connection.model);
       if (!support[message.kind] || !device[message.kind]) throw new DeskError("MEDIA_UNSUPPORTED");
+      const exchanges = await history.read(route.userId, character.id, settings.historyTurns);
+      assertActive(run);
       lastCapture.set(route.userId, now());
       stage = "consent";
-      send(run, { type: "status", stage });
+      const canFinish = message.kind === "video" && device.recordingControlSupported === true
+        && (api.host.capabilities["desktop-capture-finish-v1"] ?? 0) >= 1 && typeof captureControl?.finish === "function";
+      run.captureKey = canFinish ? run.id : null;
       const common = { deviceId: device.nativeDeviceId ?? device.id, ...(device.displayId ? { displayId: device.displayId } : {}), connectionId: connection.id, userId: route.userId,
+        ...(run.captureKey ? { requestKey: run.captureKey } : {}),
         purpose: `Desk Companion: react naturally as ${safeLabel(character.name, 60)} to one approved ${message.kind === "image" ? "screenshot" : "video-only recording"}, answering my question if provided. No continuous monitoring or computer actions.` };
-      run.capture = await api.desktop.capture.request(message.kind === "image" ? { ...common, kind: "image" }
+      const capturing = api.desktop.capture.request(message.kind === "image" ? { ...common, kind: "image" }
         : { ...common, kind: "video", mode: "record", durationSeconds: message.durationSeconds });
+      send(run, { type: "status", stage, canFinish, ...(canFinish ? { message: "Recording up to the max duration. Share again to finish and send this clip." } : {}) });
+      try { run.capture = await capturing; } finally { run.captureKey = null; }
       assertActive(run);
       if (run.capture.connectionId !== connection.id || run.capture.kind !== message.kind || run.capture.expiresAt <= now()) throw new DeskError("CAPTURE_FAILED");
       stage = "generating";
@@ -181,8 +197,10 @@ export function installCompanion(api: SpindleAPI, options: { now?: () => number;
       const generationRequest: GenerationRequestDTO & { type: "raw"; provider: string; model: string } = {
         type: "raw", provider: connection.provider, model: connection.model,
         connection_id: connection.id, userId: route.userId,
-        messages: assembleMessages(character, message.question, run.capture),
+        messages: assembleMessages(character, message.question, run.capture, connection.model, exchanges),
         tools: [], reasoning: { source: "inherit" }, signal: run.controller.signal,
+        ...(settings.mediaResolution !== "inherit" && supportsGeminiMediaResolution(connection.provider, connection.model)
+          ? { parameters: { media_resolution: settings.mediaResolution } } : {}),
       };
       try {
         for await (const chunk of api.generate.rawStream(generationRequest)) {
@@ -208,7 +226,12 @@ export function installCompanion(api: SpindleAPI, options: { now?: () => number;
       }
       assertActive(run);
       if (!terminal) throw new DeskError("GENERATION_INCOMPLETE");
+      let historySaved = true;
+      try { await history.append(route.userId, character.id, settings.historyTurns, { user: message.question.trim() || DEFAULT_REACTION_PROMPT, assistant: text }, run.controller.signal); }
+      catch { historySaved = false; }
+      assertActive(run);
       send(run, { type: "complete", text, characterName: safeLabel(character.name), voice: characterVoice(character.extensions),
+        ...(historySaved ? {} : { historyWarning: "Reply ready, but conversation history could not be saved. Check extension storage." }),
         capture: { kind: run.capture.kind, width: run.capture.width, height: run.capture.height,
           ...(run.capture.durationSeconds === undefined ? {} : { durationSeconds: run.capture.durationSeconds }) } });
     } catch (error) {
@@ -225,11 +248,29 @@ export function installCompanion(api: SpindleAPI, options: { now?: () => number;
     }
   }
 
+  async function finishCapture(run: Run): Promise<void> {
+    if (!run.captureKey || run.finishRequested || run.controller.signal.aborted || !captureControl?.finish) return;
+    run.finishRequested = true;
+    send(run, { type: "status", stage: "consent", message: "Finishing and sending the current clip…" });
+    try { await captureControl.finish(run.captureKey, { userId: run.userId }); }
+    catch {
+      if (run.captureKey && !run.controller.signal.aborted) {
+        run.finishRequested = false;
+        send(run, { type: "status", stage: "consent", canFinish: true, message: "Could not finish early. Recording will still end at the max duration; try sharing again or cancel." });
+      }
+    }
+  }
+
   const unsubscribeMessages = api.onFrontendMessage((payload, userId, frontendSessionId) => {
     if (disposed || typeof userId !== "string" || !userId || typeof frontendSessionId !== "string" || !frontendSessionId) return;
     const message = parseClientMessage(payload);
     if (!message) return;
     const route: Route = { userId, frontendSessionId, clientId: message.clientId, id: message.id };
+    if (message.type === "finish-capture") {
+      const run = active.get(userId);
+      if (run?.id === message.targetId && run.frontendSessionId === frontendSessionId && run.clientId === message.clientId) void finishCapture(run);
+      return;
+    }
     if (message.type === "cancel") {
       const run = active.get(userId);
       if (run && run.frontendSessionId === frontendSessionId && run.clientId === message.clientId && run.id === message.targetId) {
@@ -257,6 +298,8 @@ export function installCompanion(api: SpindleAPI, options: { now?: () => number;
   const shortcutsAvailable = (api.host.capabilities["command-session-routing-v1"] ?? 0) >= 1 && typeof api.commands?.onInvoked === "function";
   const unsubscribeCommands = shortcutsAvailable ? api.commands.onInvoked(async (commandId, _context, origin?: CommandOrigin) => {
     if (disposed || !origin?.userId || !origin.frontendSessionId || ![SHARE_COMMAND, QUICK_SHARE_COMMAND].includes(commandId)) return;
+    const run = active.get(origin.userId);
+    if (run?.frontendSessionId === origin.frontendSessionId) { await finishCapture(run); return; }
     if (!await sharedState.shortcut(origin.userId, origin.frontendSessionId, commandId === QUICK_SHARE_COMMAND)) {
       api.toast.info("Open Desk Companion in this Desktop window and finish any active share before using its shortcut.", { userId: origin.userId });
     }

@@ -5,6 +5,8 @@ var DEFAULT_SETTINGS = Object.freeze({
   deviceId: "",
   kind: "image",
   durationSeconds: 3,
+  historyTurns: 5,
+  mediaResolution: "inherit",
   question: "",
   autoSpeak: false,
   voiceInput: false,
@@ -30,17 +32,26 @@ function parseSettingsPatch(value) {
     } else if (key === "sttProvider") {
       if (setting !== "connection" && setting !== "whistle" && setting !== "webspeech")
         return null;
+    } else if (key === "mediaResolution") {
+      if (typeof setting !== "string" || !["inherit", "unspecified", "low", "medium", "high"].includes(setting))
+        return null;
     } else if (key === "autoSpeak" || key === "voiceInput") {
       if (typeof setting !== "boolean")
         return null;
     } else if (key === "question" || key === "voice") {
       if (typeof setting !== "string" || setting.length > (key === "question" ? MAX_QUESTION : 256))
         return null;
-    } else if (typeof setting !== "number" || !Number.isFinite(setting) || (key === "speed" ? setting < 0.25 || setting > 4 : !Number.isInteger(setting) || setting < 1 || setting > 30))
+    } else if (key === "historyTurns") {
+      if (!Number.isSafeInteger(setting) || Number(setting) < 0)
+        return null;
+    } else if (typeof setting !== "number" || !Number.isFinite(setting) || (key === "speed" ? setting < 0.25 || setting > 4 : !Number.isInteger(setting) || setting < 1 || setting > 120))
       return null;
     patch[key] = setting;
   }
   return patch;
+}
+function supportsGeminiMediaResolution(provider, model) {
+  return ["google", "google_vertex"].includes(provider) && /(?:^|\/)gemini(?:[-/]|$)/i.test(model.trim());
 }
 
 // src/protocol.ts
@@ -79,6 +90,19 @@ async function listSpeechConnections(ctx, signal) {
     throw new DOMException("Aborted", "AbortError");
   return rows.filter((entry) => entry.kind === "tts" && identifier(entry.id)).slice(0, 100).map((entry) => ({ id: entry.id, name: safeLabel(entry.name), provider: safeLabel(entry.provider), voice: (entry.voice ?? "").slice(0, 256) }));
 }
+function speechFailure(error) {
+  const message = error instanceof Error ? error.message : "";
+  if (message.startsWith("PERMISSION_DENIED:media"))
+    return new Error("Allow Desk Companion's Media permission in Extensions to play speech.");
+  if (message.startsWith("TTS_UNAVAILABLE:disabled"))
+    return new Error("Update Lumiverse to let Desk Companion use its own Spoken replies setting independently of chat TTS.");
+  if (message.startsWith("TTS_CONNECTION_NOT_FOUND") || message.startsWith("TTS_UNAVAILABLE:connectionRequired")) {
+    return new Error("Choose an available TTS connection in Desk Companion's Speech settings.");
+  }
+  if (error instanceof Error && error.name === "NotAllowedError")
+    return new Error("Audio playback was blocked in this window. Click Speak reply to try again.");
+  return new Error("Speech could not play. Check the selected TTS connection in Desk Companion's Speech settings.");
+}
 async function speakReply(text, connectionId, signal, api, onSpeaking) {
   if (signal.aborted)
     throw new DOMException("Aborted", "AbortError");
@@ -104,7 +128,7 @@ async function speakReply(text, connectionId, signal, api, onSpeaking) {
   } catch (error) {
     if (signal.aborted || error instanceof Error && error.name === "AbortError")
       throw new DOMException("Aborted", "AbortError");
-    throw new Error("Speech could not play. Check Media permission, enable TTS in Voice & Speech, and check the selected connection.");
+    throw speechFailure(error);
   } finally {
     signal.removeEventListener("abort", cancel);
     unsubscribe();
@@ -307,7 +331,7 @@ function mountSharedFields(ctx, root, selectOptions) {
         binding = bindField(() => ({ value: control.value, disabled: control.disabled }), (options) => components.mountTextArea(target, { ...options, ariaLabel, rows: 3, placeholder: control.getAttribute("placeholder") ?? "", onChange: emit }));
       } else if (control.tagName === "INPUT" && control.type === "number" && components?.mountNumericInput) {
         const input = control;
-        binding = bindField(() => ({ value: input.value === "" ? null : Number(input.value), disabled: input.disabled }), (options) => components.mountNumericInput(target, { ...options, ariaLabel, min: Number(input.min), max: Number(input.max), step: 1, integer: true, onChange: emit }));
+        binding = bindField(() => ({ value: input.value === "" ? null : Number(input.value), disabled: input.disabled }), (options) => components.mountNumericInput(target, { ...options, ariaLabel, min: input.min ? Number(input.min) : undefined, max: input.max ? Number(input.max) : undefined, step: 1, integer: true, onChange: emit }));
       } else if (control.tagName === "INPUT" && control.type === "checkbox" && components?.mountSwitch) {
         const input = control;
         binding = bindField(() => ({ checked: input.checked, disabled: input.disabled }), (options) => components.mountSwitch(target, { ...options, ariaLabel, size: "sm", onChange: emit }));
@@ -410,10 +434,14 @@ function mountView(ctx, root, options = {}) {
       <div data-pane="companion" role="tabpanel" tabindex="0">
         <div class="dc-field"><span>Character</span><select class="dc-native" data-role="character" aria-label="Character"><option value="">Choose a character</option></select></div>
         <div class="dc-field"><span>Model connection</span><select class="dc-native" data-role="connection" aria-label="Model connection"><option value="">Choose a model connection</option></select></div>
+        <div class="dc-field" data-role="media-resolution-field" hidden><span>Gemini media detail</span><select class="dc-native" data-role="media-resolution" aria-label="Gemini media detail"><option value="inherit">Use connection setting</option><option value="unspecified">Model default</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select><p class="dc-note">Higher detail can help with small text and uses more model tokens. This does not change the capture size.</p></div>
         <div class="dc-field"><span>Desktop display</span><select class="dc-native" data-role="device" aria-label="Desktop display"><option value="">Choose a display</option></select></div>
-        <div class="dc-grid"><div class="dc-field"><span>Capture</span><select class="dc-native" data-role="kind" aria-label="Capture type"><option value="image">Screenshot</option><option value="video">Video clip</option></select></div><div class="dc-field" data-role="duration-field" hidden><span>Clip length (seconds)</span><input class="dc-native" data-role="duration" aria-label="Clip duration" type="number" min="1" max="30" step="1" value="3" disabled></div></div>
+        <div class="dc-grid"><div class="dc-field"><span>Capture</span><select class="dc-native" data-role="kind" aria-label="Capture type"><option value="image">Screenshot</option><option value="video">Video clip</option></select></div><div class="dc-field" data-role="duration-field" hidden><span>Max clip duration (seconds)</span><input class="dc-native" data-role="duration" aria-label="Max clip duration" type="number" min="1" max="120" step="1" value="3" disabled></div></div>
         <p class="dc-note" data-role="capture-readiness" aria-live="polite"></p>
         <div class="dc-field"><span>Question or direction <span class="dc-optional">Optional</span></span><textarea class="dc-native" data-role="question" aria-label="Optional question or direction" placeholder="What would you like your character to react to?" maxlength="1200"></textarea></div>
+        <div class="dc-field"><span>Conversation history (exchanges)</span><input class="dc-native" data-role="history-turns" aria-label="Conversation history exchanges" type="number" min="0" step="1" value="5"></div>
+        <p class="dc-note">One exchange is your question and the character's reply. Text is saved for this account and character. Set 0 to disable history. Larger histories use more model context.</p>
+        <button data-role="clear-history" type="button">Clear this character's history</button>
         <details data-shared-section><summary>Screen capture setup</summary>
           <p class="dc-note">Enable screen capture in Desktop, then choose a display above. Approve that display in Desktop on your first share. To capture a window, use the option to choose a display or window in Desktop.</p>
           <p class="dc-note">To change a saved source, use Forget Screen Capture Approvals in the Desktop tray. Desktop also manages capture permissions and paused requests.</p>
@@ -480,9 +508,11 @@ function mountView(ctx, root, options = {}) {
   }
   const character = element("character");
   const connection = element("connection");
+  const mediaResolution = element("media-resolution");
   const device = element("device");
   const kind = element("kind");
   const duration = element("duration");
+  const historyTurns = element("history-turns");
   const question = element("question");
   const tts = element("tts");
   const outputAPI = speechAPI(ctx);
@@ -532,6 +562,7 @@ function mountView(ctx, root, options = {}) {
   let pendingBegin = null;
   let initializeVoice = false;
   let automaticRequestId = null;
+  let clearingId = null;
   const cleanups = [];
   const destroySections = surface === "settings" ? mountSharedSections(ctx, configuration) : () => {};
   const knownCharacters = new Map;
@@ -661,7 +692,7 @@ function mountView(ctx, root, options = {}) {
       const editor = ctx.components.mountKeybindingEditor(element("keybinding-editor"), { commandId });
       shortcutCleanups.push(() => editor.destroy());
       element("shortcut-editors").hidden = false;
-      help.textContent = "Share screen uses your speech settings. The second action skips voice input.";
+      help.textContent = "Share screen uses your speech settings. The second action skips voice input. During a video capture, press either action again to finish and send the current clip.";
     } catch {
       for (const cleanup of shortcutCleanups.splice(0))
         cleanup();
@@ -708,8 +739,10 @@ function mountView(ctx, root, options = {}) {
     { key: "characterId", control: character },
     { key: "connectionId", control: connection },
     { key: "deviceId", control: device },
+    { key: "mediaResolution", control: mediaResolution },
     { key: "kind", control: kind },
     { key: "durationSeconds", control: duration },
+    { key: "historyTurns", control: historyTurns },
     { key: "question", control: question },
     { key: "autoSpeak", control: autoSpeak },
     { key: "voiceInput", control: voiceInput },
@@ -820,6 +853,14 @@ function mountView(ctx, root, options = {}) {
   }
   function isBusy() {
     return runId !== null || inputController !== null || Boolean(snapshot && snapshot.activity.stage !== "idle");
+  }
+  function canFinishCapture() {
+    return snapshot?.activity.canFinish === true && snapshot.activity.ownerClientId === clientId && snapshot.activity.stage === "consent";
+  }
+  function finishCapture() {
+    const targetId = snapshot?.activity.requestId;
+    if (targetId && canFinishCapture())
+      send({ type: "finish-capture", targetId });
   }
   function updateDevices(devices) {
     if (!catalog)
@@ -940,14 +981,16 @@ function mountView(ctx, root, options = {}) {
     const video = kind.value === "video";
     const hasGrants = REQUIRED_PERMISSIONS.filter((permission) => permission !== "screen_capture" || !video).every((permission) => granted.includes(permission)) && (!video || granted.includes("screen_recording"));
     const supported = video ? chosenConnection?.video && chosenDevice?.video : chosenConnection?.image && chosenDevice?.image;
-    const validDuration = Number.isInteger(Number(duration.value)) && Number(duration.value) >= 1 && Number(duration.value) <= 30;
+    const validDuration = Number.isInteger(Number(duration.value)) && Number(duration.value) >= 1 && Number(duration.value) <= 120;
     const validVoice = Boolean(outputAPI) && granted.includes("media") && speechConnections.some((entry) => entry.id === tts.value);
     const provider = inputProviders.find((entry) => entry.id === sttProvider.value);
     const connectionInput = sttProvider.value === "connection";
     const providerReady = provider?.available || connectionInput && provider?.unavailableReason === "connectionRequired";
     const validInput = Boolean(providerReady) && Boolean(inputAPI) && granted.includes("media") && (!connectionInput || transcriptionConnections.some((entry) => entry.id === stt.value));
-    for (const control of [character, connection, device, kind, question, tts, autoSpeak, sttProvider, stt])
+    for (const control of [character, connection, device, kind, question, historyTurns, mediaResolution, tts, autoSpeak, sttProvider, stt])
       control.disabled = busy;
+    element("media-resolution-field").hidden = !chosenConnection || !supportsGeminiMediaResolution(chosenConnection.provider, chosenConnection.model);
+    element("clear-history").disabled = busy || !snapshot || !current.characterId;
     voiceInput.disabled = busy || !inputAPI;
     element("voice-options").hidden = !voiceInput.checked;
     element("stt-connection").hidden = !connectionInput;
@@ -959,8 +1002,8 @@ function mountView(ctx, root, options = {}) {
     const blocked = !snapshot || subscription !== null || busy || saving !== null || Object.keys(pendingPatch).length > 0 || needsSettings;
     canQuickShare = !blocked;
     canShare = !blocked && (!voiceInput.checked || validInput);
-    element("observe").disabled = surface !== "widget" || !canShare;
-    element("observe").textContent = video ? "Share a video clip" : "Look at my screen";
+    element("observe").disabled = surface !== "widget" || !canShare && !canFinishCapture();
+    element("observe").textContent = canFinishCapture() ? "Finish and send clip" : video ? "Share a video clip" : "Look at my screen";
     element("cancel").disabled = !busy || stage === "cancelling";
     element("cancel").hidden = !busy;
     const speaking = speechController !== null || Boolean(snapshot && snapshot.activity.speechStage !== "idle");
@@ -1108,6 +1151,16 @@ function mountView(ctx, root, options = {}) {
     if (disposed || !record(payload) || payload.channel !== CHANNEL || payload.clientId !== clientId || typeof payload.id !== "string")
       return;
     const message = payload;
+    if (message.id === clearingId) {
+      if (message.type === "error") {
+        clearingId = null;
+        notice(message.message, true);
+        updateControls();
+        return;
+      }
+      if (message.type === "state")
+        clearingId = null;
+    }
     if (message.type === "shortcut") {
       updateControls();
       if (message.skipVoice ? canQuickShare : canShare)
@@ -1349,7 +1402,7 @@ function mountView(ctx, root, options = {}) {
         generating: "The approved capture is attached privately. Your character is thinking…",
         cancelling: "Share cancelled. Waiting for any pending Desktop capture to finish or stop."
       };
-      notice(messages[message.stage]);
+      notice(message.message ?? messages[message.stage]);
     } else if (message.type === "text" && stage !== "cancelling")
       reply.textContent = message.text;
     else if (message.type === "complete") {
@@ -1369,7 +1422,7 @@ function mountView(ctx, root, options = {}) {
       completedVoice = message.voice;
       reply.textContent = message.text;
       element("speaker").textContent = message.characterName;
-      notice("");
+      notice(message.historyWarning ?? "", Boolean(message.historyWarning));
       if (message.text.length > MAX_SPEECH_CHARS)
         element("speech-status").textContent = "Reply exceeds the 2,400-character speech limit. Ask for a shorter answer.";
       else if (chosenVoice)
@@ -1483,13 +1536,24 @@ function mountView(ctx, root, options = {}) {
     }
   }
   listen(element("observe"), "click", () => {
-    share();
+    if (canFinishCapture())
+      finishCapture();
+    else
+      share();
   });
   listen(element("cancel"), "click", () => cancel());
+  function clearConversation() {
+    clearingId = createMessageId();
+    send({ type: "clear-state" }, clearingId);
+  }
   listen(element("clear"), "click", () => {
     cancel();
     clearReply();
-    send({ type: "clear-state" });
+    clearConversation();
+  });
+  listen(element("clear-history"), "click", () => {
+    clearReply();
+    clearConversation();
   });
   listen(element("refresh"), "click", () => {
     retainSettingsEdits();
@@ -1524,7 +1588,7 @@ function mountView(ctx, root, options = {}) {
   listen(element("character-voice"), "click", () => applyCharacterVoice());
   for (const { key, control } of settingsControls)
     listen(control, "input", () => {
-      const value = key === "autoSpeak" || key === "voiceInput" ? control.checked : ["durationSeconds"].includes(key) ? Number(control.value) : control.value;
+      const value = key === "autoSpeak" || key === "voiceInput" ? control.checked : ["durationSeconds", "historyTurns"].includes(key) ? Number(control.value) : control.value;
       queueSettings({ [key]: value });
       if (key === "characterId") {
         clearReply();

@@ -7,7 +7,7 @@ import type { SpeechConnection } from "./speech";
 import { listTranscriptionConnections, recognizeQuestion, speechInputAPI, transcriptionProviders } from "./speech-input";
 import type { TranscriptionConnection, TranscriptionProvider } from "./speech-input";
 import { AutomaticShareSpeech, prepareShareQuestion } from "./share-workflow";
-import { DEFAULT_SETTINGS, parseSettingsPatch } from "./settings";
+import { DEFAULT_SETTINGS, parseSettingsPatch, supportsGeminiMediaResolution } from "./settings";
 import type { CompanionSettings, CompanionSnapshot } from "./settings";
 import { QUICK_SHARE_COMMAND, SHARE_COMMAND } from "./shortcuts";
 import { mountSharedBadge, mountSharedFields, mountSharedSections } from "./shared-ui";
@@ -31,10 +31,14 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
       <div data-pane="companion" role="tabpanel" tabindex="0">
         <div class="dc-field"><span>Character</span><select class="dc-native" data-role="character" aria-label="Character"><option value="">Choose a character</option></select></div>
         <div class="dc-field"><span>Model connection</span><select class="dc-native" data-role="connection" aria-label="Model connection"><option value="">Choose a model connection</option></select></div>
+        <div class="dc-field" data-role="media-resolution-field" hidden><span>Gemini media detail</span><select class="dc-native" data-role="media-resolution" aria-label="Gemini media detail"><option value="inherit">Use connection setting</option><option value="unspecified">Model default</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select><p class="dc-note">Higher detail can help with small text and uses more model tokens. This does not change the capture size.</p></div>
         <div class="dc-field"><span>Desktop display</span><select class="dc-native" data-role="device" aria-label="Desktop display"><option value="">Choose a display</option></select></div>
-        <div class="dc-grid"><div class="dc-field"><span>Capture</span><select class="dc-native" data-role="kind" aria-label="Capture type"><option value="image">Screenshot</option><option value="video">Video clip</option></select></div><div class="dc-field" data-role="duration-field" hidden><span>Clip length (seconds)</span><input class="dc-native" data-role="duration" aria-label="Clip duration" type="number" min="1" max="30" step="1" value="3" disabled></div></div>
+        <div class="dc-grid"><div class="dc-field"><span>Capture</span><select class="dc-native" data-role="kind" aria-label="Capture type"><option value="image">Screenshot</option><option value="video">Video clip</option></select></div><div class="dc-field" data-role="duration-field" hidden><span>Max clip duration (seconds)</span><input class="dc-native" data-role="duration" aria-label="Max clip duration" type="number" min="1" max="120" step="1" value="3" disabled></div></div>
         <p class="dc-note" data-role="capture-readiness" aria-live="polite"></p>
         <div class="dc-field"><span>Question or direction <span class="dc-optional">Optional</span></span><textarea class="dc-native" data-role="question" aria-label="Optional question or direction" placeholder="What would you like your character to react to?" maxlength="1200"></textarea></div>
+        <div class="dc-field"><span>Conversation history (exchanges)</span><input class="dc-native" data-role="history-turns" aria-label="Conversation history exchanges" type="number" min="0" step="1" value="5"></div>
+        <p class="dc-note">One exchange is your question and the character's reply. Text is saved for this account and character. Set 0 to disable history. Larger histories use more model context.</p>
+        <button data-role="clear-history" type="button">Clear this character's history</button>
         <details data-shared-section><summary>Screen capture setup</summary>
           <p class="dc-note">Enable screen capture in Desktop, then choose a display above. Approve that display in Desktop on your first share. To capture a window, use the option to choose a display or window in Desktop.</p>
           <p class="dc-note">To change a saved source, use Forget Screen Capture Approvals in the Desktop tray. Desktop also manages capture permissions and paused requests.</p>
@@ -95,9 +99,11 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
 
   const character = element<HTMLSelectElement>("character");
   const connection = element<HTMLSelectElement>("connection");
+  const mediaResolution = element<HTMLSelectElement>("media-resolution");
   const device = element<HTMLSelectElement>("device");
   const kind = element<HTMLSelectElement>("kind");
   const duration = element<HTMLInputElement>("duration");
+  const historyTurns = element<HTMLInputElement>("history-turns");
   const question = element<HTMLTextAreaElement>("question");
   const tts = element<HTMLSelectElement>("tts");
   const outputAPI = speechAPI(ctx);
@@ -147,6 +153,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
   let pendingBegin: { id: string; resolve: () => void; reject: (error: Error) => void } | null = null;
   let initializeVoice = false;
   let automaticRequestId: string | null = null;
+  let clearingId: string | null = null;
   const cleanups: Array<() => void> = [];
   const destroySections = surface === "settings" ? mountSharedSections(ctx, configuration) : () => {};
   const knownCharacters = new Map<string, CharacterOption>();
@@ -245,7 +252,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
       const editor = ctx.components.mountKeybindingEditor(element("keybinding-editor"), { commandId });
       shortcutCleanups.push(() => editor.destroy());
       element("shortcut-editors").hidden = false;
-      help.textContent = "Share screen uses your speech settings. The second action skips voice input.";
+      help.textContent = "Share screen uses your speech settings. The second action skips voice input. During a video capture, press either action again to finish and send the current clip.";
     } catch {
       for (const cleanup of shortcutCleanups.splice(0)) cleanup();
       help.textContent = "The shortcut editor could not open. Configure Desk Companion in Desktop Settings → Key Bindings, then reopen this panel."; }
@@ -283,7 +290,8 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
 
   const settingsControls: Array<{ key: keyof CompanionSettings; control: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement }> = [
     { key: "characterId", control: character }, { key: "connectionId", control: connection }, { key: "deviceId", control: device },
-    { key: "kind", control: kind }, { key: "durationSeconds", control: duration }, { key: "question", control: question },
+    { key: "mediaResolution", control: mediaResolution },
+    { key: "kind", control: kind }, { key: "durationSeconds", control: duration }, { key: "historyTurns", control: historyTurns }, { key: "question", control: question },
     { key: "autoSpeak", control: autoSpeak }, { key: "voiceInput", control: voiceInput }, { key: "sttProvider", control: sttProvider }, { key: "sttId", control: stt },
     { key: "ttsId", control: tts },
   ];
@@ -377,6 +385,15 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     return runId !== null || inputController !== null || Boolean(snapshot && snapshot.activity.stage !== "idle");
   }
 
+  function canFinishCapture(): boolean {
+    return snapshot?.activity.canFinish === true && snapshot.activity.ownerClientId === clientId && snapshot.activity.stage === "consent";
+  }
+
+  function finishCapture(): void {
+    const targetId = snapshot?.activity.requestId;
+    if (targetId && canFinishCapture()) send({ type: "finish-capture", targetId });
+  }
+
   function updateDevices(devices: DeviceOption[]): void {
     if (!catalog) return;
     catalog.devices = devices;
@@ -466,14 +483,16 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     const hasGrants = REQUIRED_PERMISSIONS.filter((permission) => permission !== "screen_capture" || !video)
       .every((permission) => granted.includes(permission)) && (!video || granted.includes("screen_recording"));
     const supported = video ? chosenConnection?.video && chosenDevice?.video : chosenConnection?.image && chosenDevice?.image;
-    const validDuration = Number.isInteger(Number(duration.value)) && Number(duration.value) >= 1 && Number(duration.value) <= 30;
+    const validDuration = Number.isInteger(Number(duration.value)) && Number(duration.value) >= 1 && Number(duration.value) <= 120;
     const validVoice = Boolean(outputAPI) && granted.includes("media") && speechConnections.some((entry) => entry.id === tts.value);
     const provider = inputProviders.find((entry) => entry.id === sttProvider.value);
     const connectionInput = sttProvider.value === "connection";
     const providerReady = provider?.available || connectionInput && provider?.unavailableReason === "connectionRequired";
     const validInput = Boolean(providerReady) && Boolean(inputAPI) && granted.includes("media")
       && (!connectionInput || transcriptionConnections.some((entry) => entry.id === stt.value));
-    for (const control of [character, connection, device, kind, question, tts, autoSpeak, sttProvider, stt]) control.disabled = busy;
+    for (const control of [character, connection, device, kind, question, historyTurns, mediaResolution, tts, autoSpeak, sttProvider, stt]) control.disabled = busy;
+    element("media-resolution-field").hidden = !chosenConnection || !supportsGeminiMediaResolution(chosenConnection.provider, chosenConnection.model);
+    element<HTMLButtonElement>("clear-history").disabled = busy || !snapshot || !current.characterId;
     voiceInput.disabled = busy || !inputAPI;
     element("voice-options").hidden = !voiceInput.checked;
     element("stt-connection").hidden = !connectionInput;
@@ -496,8 +515,8 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     const blocked = !snapshot || subscription !== null || busy || saving !== null || Object.keys(pendingPatch).length > 0 || needsSettings;
     canQuickShare = !blocked;
     canShare = !blocked && (!voiceInput.checked || validInput);
-    element<HTMLButtonElement>("observe").disabled = surface !== "widget" || !canShare;
-    element("observe").textContent = video ? "Share a video clip" : "Look at my screen";
+    element<HTMLButtonElement>("observe").disabled = surface !== "widget" || !canShare && !canFinishCapture();
+    element("observe").textContent = canFinishCapture() ? "Finish and send clip" : video ? "Share a video clip" : "Look at my screen";
     element<HTMLButtonElement>("cancel").disabled = !busy || stage === "cancelling";
     element("cancel").hidden = !busy;
     const speaking = speechController !== null || Boolean(snapshot && snapshot.activity.speechStage !== "idle");
@@ -635,6 +654,10 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
   const unsubscribe = ctx.onBackendMessage((payload) => {
     if (disposed || !record(payload) || payload.channel !== CHANNEL || payload.clientId !== clientId || typeof payload.id !== "string") return;
     const message = payload as unknown as ServerMessage;
+    if (message.id === clearingId) {
+      if (message.type === "error") { clearingId = null; notice(message.message, true); updateControls(); return; }
+      if (message.type === "state") clearingId = null;
+    }
     if (message.type === "shortcut") {
       updateControls();
       if (message.skipVoice ? canQuickShare : canShare) void share({ shortcut: true, skipVoice: message.skipVoice });
@@ -777,7 +800,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
       stage = message.stage;
       const messages = { checking: "Verifying the character, model, and desktop for your account…", consent: CAPTURE_PENDING,
         generating: "The approved capture is attached privately. Your character is thinking…", cancelling: "Share cancelled. Waiting for any pending Desktop capture to finish or stop." };
-      notice(messages[message.stage]);
+      notice(message.message ?? messages[message.stage]);
     } else if (message.type === "text" && stage !== "cancelling") reply.textContent = message.text;
     else if (message.type === "complete") {
       const chosenVoice = automaticSpeech.take(message.id);
@@ -785,7 +808,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
       if (stage === "cancelling") { runId = null; stage = "idle"; clearReply(); notice("Observation cancelled; no automatic speech."); updateControls(); return; }
       runId = null; stage = "idle"; completedText = message.text; completedVoice = message.voice;
       reply.textContent = message.text; element("speaker").textContent = message.characterName;
-      notice("");
+      notice(message.historyWarning ?? "", Boolean(message.historyWarning));
       if (message.text.length > MAX_SPEECH_CHARS) element("speech-status").textContent = "Reply exceeds the 2,400-character speech limit. Ask for a shorter answer.";
       else if (chosenVoice) void speak(chosenVoice);
     } else if (message.type === "error") {
@@ -870,9 +893,14 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
       if (!disposed) updateControls();
     }
   }
-  listen(element("observe"), "click", () => { void share(); });
+  listen(element("observe"), "click", () => { if (canFinishCapture()) finishCapture(); else void share(); });
   listen(element("cancel"), "click", () => cancel());
-  listen(element("clear"), "click", () => { cancel(); clearReply(); send({ type: "clear-state" }); });
+  function clearConversation(): void {
+    clearingId = createMessageId();
+    send({ type: "clear-state" }, clearingId);
+  }
+  listen(element("clear"), "click", () => { cancel(); clearReply(); clearConversation(); });
+  listen(element("clear-history"), "click", () => { clearReply(); clearConversation(); });
   listen(element("refresh"), "click", () => { retainSettingsEdits(); subscribe(); refresh(); refreshSpeechConnections(true); });
   listen(element("check-devices"), "click", () => { if (catalog) discoverDevices(); else refresh(); });
   listen(element("shortcut-action"), "change", () => {
@@ -885,7 +913,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
   listen(element("character-voice"), "click", () => applyCharacterVoice());
   for (const { key, control } of settingsControls) listen(control, "input", () => {
     const value = key === "autoSpeak" || key === "voiceInput" ? (control as HTMLInputElement).checked
-      : ["durationSeconds"].includes(key) ? Number(control.value) : control.value;
+      : ["durationSeconds", "historyTurns"].includes(key) ? Number(control.value) : control.value;
     queueSettings({ [key]: value });
     if (key === "characterId") { clearReply(); applyCharacterVoice(); }
     updateControls();

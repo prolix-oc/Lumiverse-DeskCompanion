@@ -16,7 +16,7 @@ function client(host: ReturnType<typeof fixture>, clientId: string, sessionId: s
 describe("authoritative companion state", () => {
   test("bounds settings and refuses unexpected paths, identities, and switches", () => {
     for (const patch of [{ userId: "user-b" }, { path: "../secret" }, { autoSpeak: "true" }, { voiceSeconds: 16 },
-      { durationSeconds: 31 }, { question: "x".repeat(1201) }, { speed: Number.NaN }, { deviceId: "../desktop" }, { sttProvider: "unknown" }, {}]) {
+      { durationSeconds: 121 }, { question: "x".repeat(1201) }, { speed: Number.NaN }, { deviceId: "../desktop" }, { sttProvider: "unknown" }, {}]) {
       expect(parseSettingsPatch(patch)).toBeNull();
     }
     expect(parseSettingsPatch({ autoSpeak: false, voiceInput: false, question: "" })).not.toBeNull();
@@ -65,7 +65,7 @@ describe("authoritative companion state", () => {
     } finally { dispose(); }
   });
 
-  test("reopening and restarting restores preferences but never persists or auto-replays a reply", async () => {
+  test("restarting restores preferences and text history without auto-replaying a reply", async () => {
     const host = fixture(); let dispose = installCompanion(host.api);
     const sidebar = client(host, "sidebar-a", "document-a");
     try {
@@ -73,7 +73,7 @@ describe("authoritative companion state", () => {
       const epoch = host.sent.at(-1)?.payload.snapshot.epoch;
       host.emit(host.message()); await settle();
       expect(host.sent.some((entry) => entry.payload.type === "state" && entry.payload.snapshot.activity.text)).toBe(true);
-      const stored = JSON.stringify([...host.stored.values()]); expect(stored).not.toContain("calendar"); expect(stored).not.toContain("private-asset");
+      const stored = JSON.stringify([...host.stored.values()]); expect(stored).toContain("calendar"); expect(stored).not.toContain("private-asset");
       dispose(); dispose = installCompanion(host.api);
       client(host, "widget-new", "document-new")("subscribe"); await settle();
       const snapshot = host.sent.at(-1)?.payload.snapshot;

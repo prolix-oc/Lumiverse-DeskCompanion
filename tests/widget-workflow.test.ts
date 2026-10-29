@@ -7,8 +7,12 @@ import { CHARACTER, deferred, fixture, settle } from "./fixtures";
 
 async function widget(options: { stt?: Promise<Response>; silence?: Promise<void>; tts?: Promise<Response>; autoplayBlocked?: boolean; microphoneDenied?: boolean; offline?: boolean; approval?: boolean; desktop?: boolean; oldHost?: boolean;
   listSpeech?: (kind: string, sessionId: string) => Promise<any[]>;
-  dropInitialSubscription?: boolean; characterLibrary?: boolean; legacyPicker?: boolean; sharedControls?: boolean; hostStt?: boolean; hostSpeech?: boolean; noConnections?: boolean; noMedia?: boolean; providers?: SpindleSTTProviderOption[] } = {}) {
+  dropInitialSubscription?: boolean; characterLibrary?: boolean; legacyPicker?: boolean; sharedControls?: boolean; hostStt?: boolean; hostSpeech?: boolean; noConnections?: boolean; noMedia?: boolean; finishSupport?: boolean; providers?: SpindleSTTProviderOption[] } = {}) {
   const host = fixture();
+  if (options.finishSupport) {
+    Object.assign(host.mutable.host.capabilities, { "desktop-capture-finish-v1": 1 });
+    Object.assign(host.device, { recordingControlSupported: true });
+  }
   const library = Array.from({ length: 125 }, (_, i) => ({ ...CHARACTER, id: i === 0 ? CHARACTER.id : `character-${i}`,
     name: i === 0 ? CHARACTER.name : i === 120 ? "Zelda" : `Companion ${i}`,
     avatar_url: `https://lumiverse.test/thumbnail-${i}.png` }));
@@ -113,7 +117,8 @@ async function widget(options: { stt?: Promise<Response>; silence?: Promise<void
         const startup = (async () => {
           const response = await (options.tts ?? new Response("audio"));
           if (call.stopped) return;
-          if (!response.ok || options.autoplayBlocked) throw new Error("PRIVATE_PROVIDER_ERROR");
+          if (!response.ok) throw new Error("PRIVATE_PROVIDER_ERROR");
+          if (options.autoplayBlocked) throw new DOMException("PRIVATE_PLAYBACK_ERROR", "NotAllowedError");
           playback += 1; speaking = true; for (const listener of speechListeners) listener(true);
           await finished.promise;
         })();
@@ -193,6 +198,71 @@ async function widget(options: { stt?: Promise<Response>; silence?: Promise<void
 }
 
 describe("configured widget share pipeline", () => {
+  test("Gemini media detail is optional, saves to shared settings, and reaches the request", async () => {
+    const screen = await widget();
+    try {
+      expect(screen.settings.panel.querySelector<HTMLElement>('[data-role="media-resolution-field"]')!.hidden).toBe(false);
+      const detail = screen.components.find(c => c.options.ariaLabel === "Gemini media detail")!;
+      expect(detail.options.value).toBe("inherit");
+      detail.options.onChange("high"); await screen.synchronize();
+      expect(screen.outgoing.filter(m => m.type === "configure").at(-1).patch.mediaResolution).toBe("high");
+      screen.element<HTMLButtonElement>("observe").click(); await settle(); await screen.approve();
+      expect(screen.host.generations[0].parameters).toEqual({ media_resolution: "high" });
+    } finally { await screen.close(); }
+  });
+
+  test("history count saves without a fixed ceiling and the settings control clears the selected character", async () => {
+    const screen = await widget();
+    try {
+      const count = screen.components.find(c => c.options.ariaLabel === "Conversation history exchanges")!;
+      expect(count.options.value).toBe(5);
+      expect(count.options.max).toBeUndefined();
+      count.options.onChange(250); await screen.synchronize();
+      expect(screen.outgoing.filter(m => m.type === "configure").at(-1).patch.historyTurns).toBe(250);
+      screen.element<HTMLButtonElement>("observe").click(); await settle(); await screen.approve();
+      screen.element<HTMLButtonElement>("clear-history").click(); await settle();
+      expect(screen.host.stored.get(JSON.stringify(["user-a", "companion-history-character-a.json"]))).toEqual([]);
+    } finally { await screen.close(); }
+  });
+
+  test("the same shortcut or share button finishes one video early without a second capture or microphone session", async () => {
+    for (const trigger of ["shortcut", "button"] as const) {
+      const screen = await widget({ finishSupport: true });
+      try {
+        screen.components.find(c => c.options.ariaLabel === "Capture type")!.options.onChange("video");
+        screen.components.find(c => c.options.ariaLabel === "Max clip duration")!.options.onChange(120);
+        await screen.synchronize();
+        if (trigger === "shortcut") await screen.host.invoke(); else screen.element<HTMLButtonElement>("observe").click();
+        await settle();
+        expect(screen.host.requests).toHaveLength(1);
+        expect(screen.host.requests[0].durationSeconds).toBe(120);
+        expect(screen.element("observe").textContent).toBe("Finish and send clip");
+        expect(screen.element<HTMLButtonElement>("observe").disabled).toBe(false);
+        if (trigger === "shortcut") { await screen.host.invoke(); await screen.host.invoke(); }
+        else { screen.element<HTMLButtonElement>("observe").click(); screen.element<HTMLButtonElement>("observe").click(); }
+        await settle();
+        expect(screen.host.finished).toEqual([{ requestKey: screen.host.requests[0].requestKey, userId: "user-a" }]);
+        expect(screen.host.requests).toHaveLength(1); expect(screen.microphoneRequests()).toBe(0);
+        Object.assign(screen.host.capture, { kind: "video", mimeType: "video/mp4", durationSeconds: 2.5 });
+        await screen.approve();
+        expect(screen.host.generations).toHaveLength(1);
+        expect(screen.element("reply").textContent).toBe("You have a calendar open.");
+        expect(screen.host.released).toHaveLength(1);
+      } finally { await screen.close(); }
+    }
+  });
+
+  test("older desktops retain cutoff capture and ignore repeated share actions", async () => {
+    const screen = await widget();
+    try {
+      screen.components.find(c => c.options.ariaLabel === "Capture type")!.options.onChange("video");
+      await screen.synchronize(); await screen.host.invoke(); await settle(); await screen.host.invoke();
+      expect(screen.host.finished).toHaveLength(0); expect(screen.host.requests).toHaveLength(1);
+      expect(screen.element<HTMLButtonElement>("observe").disabled).toBe(true);
+      Object.assign(screen.host.capture, { kind: "video", mimeType: "video/mp4", durationSeconds: 3 });
+      await screen.approve(); expect(screen.host.generations).toHaveLength(1);
+    } finally { await screen.close(); }
+  });
   test("speech lists recover from an initially empty host cache on focus without polling", async () => {
     let ready = false;
     const screen = await widget({ listSpeech: async kind => ready ? [{ id: `${kind}-ready`, kind, name: `${kind} ready`, provider: "google" }] : [] });
@@ -378,7 +448,7 @@ describe("configured widget share pipeline", () => {
   test("shared controls repeating the same value on blur do not save again", async () => {
     const screen = await widget();
     try {
-      const field = screen.components.find(c => c.options.ariaLabel === "Clip duration")!;
+      const field = screen.components.find(c => c.options.ariaLabel === "Max clip duration")!;
       screen.components.find(c => c.options.ariaLabel === "Capture type")!.options.onChange("video");
       field.options.onChange(10); await screen.debounceSettings();
       const count = screen.outgoing.filter(message => message.type === "configure").length;
@@ -551,7 +621,7 @@ describe("configured widget share pipeline", () => {
       field("STT provider").options.onChange("whistle");
       field("Voice input").options.onChange(true);
       field("Capture type").options.onChange("video");
-      field("Clip duration").options.onChange(10);
+      field("Max clip duration").options.onChange(10);
       field("Optional question or direction").options.onChange("x".repeat(1200));
       field("Optional question or direction").options.onChange("x".repeat(1201));
       expect(field("Optional question or direction").options.value).toHaveLength(1200);
@@ -1132,7 +1202,7 @@ describe("configured widget share pipeline", () => {
       await screen.enable("auto-speak"); screen.element<HTMLButtonElement>("observe").click(); await settle(); await screen.approve();
       expect(screen.speechCalls).toHaveLength(1); expect(screen.isSpeaking()).toBe(false);
       expect(screen.view.panel.querySelector("audio")).toBeNull();
-      expect(screen.element("speech-status").textContent).toContain("Speech could not play");
+      expect(screen.element("speech-status").textContent).toContain("Audio playback was blocked");
     } finally { await screen.close(); }
   });
   test("TTS failure retains generated text without restarting generation", async () => {

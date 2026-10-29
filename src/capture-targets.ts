@@ -6,6 +6,7 @@ import type { DeviceOption } from "./protocol";
 export function captureTargets(devices: DesktopCaptureDevice[], now: number): DeviceOption[] {
   return devices.filter(device => device.expiresAt > now).flatMap(device => {
     const picker: DeviceOption = { id: device.id, ...(device.stableIdentity === true ? { stableIdentity: true } : {}),
+      ...("recordingControlSupported" in device && device.recordingControlSupported === true ? { recordingControlSupported: true } : {}),
       name: safeLabel(device.name), platform: device.platform, image: device.capabilities.image, video: device.capabilities.video };
     // Feature detection also lets this extension build with older Spindle type packages.
     if (!("displays" in device) || !Array.isArray(device.displays)) return [picker];
