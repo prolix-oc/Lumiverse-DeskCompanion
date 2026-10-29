@@ -209,6 +209,7 @@ export function createCompanionState(api: SpindleAPI, cancelRun: (route: Route) 
       state.activity.stage = body.stage;
       state.activity.canFinish = body.stage === "consent" && body.canFinish === true;
       state.activity.message = body.message ?? (body.stage === "consent" ? CAPTURE_PENDING
+        : body.stage === "optimizing" ? "Optimizing the capture before sending it to your model…"
         : body.stage === "generating" ? "Your character is reacting to the approved capture…"
         : body.stage === "cancelling" ? "Cancelling. Use Stop & Discard in any native capture panel still open." : "Checking character, model, and desktop…");
     } else if (body.type === "text") state.activity.text = body.text;

@@ -91,7 +91,7 @@ export type ServerMessage = Envelope & (
   | { type: "devices"; devices: DeviceOption[] }
   | { type: "approval"; status: DesktopCaptureApprovalStatus }
   | { type: "shortcut"; skipVoice: boolean }
-  | { type: "status"; stage: "checking" | "consent" | "generating" | "cancelling"; canFinish?: boolean; message?: string }
+  | { type: "status"; stage: "checking" | "consent" | "optimizing" | "generating" | "cancelling"; canFinish?: boolean; message?: string }
   | { type: "text"; text: string }
   | { type: "complete"; text: string; characterName: string; voice: VoiceRef | null; historyWarning?: string; capture: { kind: "image" | "video"; width: number; height: number; durationSeconds?: number } }
   | { type: "error"; code: ErrorCode; message: string }
@@ -99,9 +99,11 @@ export type ServerMessage = Envelope & (
 
 export type ErrorCode = "SESSION_REQUIRED" | "INVALID_REQUEST" | "HOST_UNSUPPORTED" | "BUSY" | "COOLDOWN" | "CHARACTER_UNAVAILABLE" | "CONNECTION_UNAVAILABLE" | "DEVICE_UNAVAILABLE" | "MEDIA_UNSUPPORTED" | "PERMISSION_REQUIRED" | "CAPTURE_FAILED" | "CANCELLED" | "TIMED_OUT" | "GENERATION_FAILED" | "OUTPUT_LIMIT" | "SETTINGS_FAILED" | "SETTINGS_CHANGED" | "HISTORY_FAILED"
   | "DESTINATION_CHANGED" | "GENERATION_AUTH_FAILED" | "GENERATION_RATE_LIMITED" | "GENERATION_INVALID_REQUEST" | "GENERATION_UNAVAILABLE"
-  | "GENERATION_TOKEN_LIMIT" | "GENERATION_BLOCKED" | "GENERATION_INCOMPLETE" | "GENERATION_NO_TEXT";
+  | "GENERATION_TOKEN_LIMIT" | "GENERATION_BLOCKED" | "GENERATION_INCOMPLETE" | "GENERATION_NO_TEXT" | "OPTIMIZATION_UNSUPPORTED" | "OPTIMIZATION_FAILED";
 
 export const ERROR_MESSAGES: Record<ErrorCode, string> = {
+  OPTIMIZATION_UNSUPPORTED: "Update the Lumiverse backend to optimize desktop captures, or turn off Optimize before sending in Companion settings. No capture was requested.",
+  OPTIMIZATION_FAILED: "The capture could not be optimized. Check that FFmpeg is available on the backend for video, adjust optimization settings, or turn off Optimize before sending. Nothing was sent to the model.",
   HISTORY_FAILED: "Conversation history could not be loaded or saved. Check extension storage, clear this character's history, or set history to 0 before sharing again.",
   SESSION_REQUIRED: "Desk Companion needs to reconnect before saving or sharing. Refresh to reconnect.",
   SETTINGS_FAILED: "Companion settings could not be loaded or saved. Refresh before sharing; no capture was requested.",

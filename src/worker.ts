@@ -2,6 +2,8 @@ import type { CapturedMediaRef, CharacterDTO, GenerationRequestDTO, SpindleAPI }
 import { assembleMessages, DEFAULT_REACTION_PROMPT } from "./prompt";
 import { createHistory } from "./history";
 import { supportsGeminiMediaResolution } from "./settings";
+import { optimizationRequest } from "./capture-optimization";
+import type { CaptureOptimizer } from "./capture-optimization";
 import { captureTargets } from "./capture-targets";
 import { CHANNEL, CHARACTER_PAGE_SIZE, DeskError, ERROR_MESSAGES, MAX_REPLY, characterVoice, mediaSupport, parseClientMessage, record, safeLabel } from "./protocol";
 import type { Catalog, CharacterOption, ClientMessage, DeviceOption, ErrorCode, ServerMessage } from "./protocol";
@@ -32,7 +34,7 @@ function characterOption(character: CharacterDTO): CharacterOption {
     avatarUrl: (character as CharacterDTO & { avatar_url?: string | null }).avatar_url ?? null };
 }
 
-function errorCode(error: unknown, stage: "checking" | "consent" | "generating"): ErrorCode {
+function errorCode(error: unknown, stage: "checking" | "consent" | "optimizing" | "generating"): ErrorCode {
   if (error instanceof DeskError) return error.code;
   const message = error instanceof Error ? error.message : "";
   if (/PERMISSION_DENIED|permission.*not granted/i.test(message)) return "PERMISSION_REQUIRED";
@@ -40,6 +42,7 @@ function errorCode(error: unknown, stage: "checking" | "consent" | "generating")
   if (/CAPTURE_DESTINATION_CHANGED/.test(message)) return "DESTINATION_CHANGED";
   if (/CAPTURE_(?:DEVICE|DISPLAY)_UNAVAILABLE|DESKTOP_UNAVAILABLE/.test(message)) return "DEVICE_UNAVAILABLE";
   if (stage === "consent") return "CAPTURE_FAILED";
+  if (stage === "optimizing") return "OPTIMIZATION_FAILED";
   if (stage === "generating") {
     const status = Number(message.match(/\bfailed\s*\((\d{3})\)/i)?.[1]);
     if (status === 401 || status === 403) return "GENERATION_AUTH_FAILED";
@@ -61,6 +64,7 @@ export function installCompanion(api: SpindleAPI, options: { now?: () => number;
   const captureControl = api.desktop?.capture as (typeof api.desktop.capture & {
     finish?: (requestKey: string, options: { userId: string }) => Promise<boolean>;
   }) | undefined;
+  const captureOptimizer = api.desktop?.capture as (typeof api.desktop.capture & CaptureOptimizer) | undefined;
   const sharedState = createCompanionState(api, (route) => {
     const run = active.get(route.userId);
     if (run?.id === route.id && run.clientId === route.clientId && run.frontendSessionId === route.frontendSessionId) run.controller.abort();
@@ -155,10 +159,12 @@ export function installCompanion(api: SpindleAPI, options: { now?: () => number;
     const run: Run = { ...route, controller: new AbortController(), timedOut: false, capture: null, captureKey: null, finishRequested: false };
     active.set(route.userId, run);
     const timer = setTimeout(() => { run.timedOut = true; run.controller.abort(); }, options.timeoutMs ?? 420000);
-    let stage: "checking" | "consent" | "generating" = "checking";
+    let stage: "checking" | "consent" | "optimizing" | "generating" = "checking";
     try {
       const settings = await sharedState.beforeObserve(message, route);
       assertActive(run);
+      if (settings.optimizeMedia && ((api.host.capabilities["desktop-capture-optimize-v1"] ?? 0) < 1
+        || typeof captureOptimizer?.optimize !== "function")) throw new DeskError("OPTIMIZATION_UNSUPPORTED");
       send(run, { type: "status", stage });
       const [character, connection, devices] = await Promise.all([
         api.characters.get(message.characterId, route.userId),
@@ -188,6 +194,20 @@ export function installCompanion(api: SpindleAPI, options: { now?: () => number;
       try { run.capture = await capturing; } finally { run.captureKey = null; }
       assertActive(run);
       if (run.capture.connectionId !== connection.id || run.capture.kind !== message.kind || run.capture.expiresAt <= now()) throw new DeskError("CAPTURE_FAILED");
+      if (settings.optimizeMedia) {
+        stage = "optimizing";
+        send(run, { type: "status", stage, canFinish: false, message: "Optimizing the capture before sending it to your model…" });
+        const original = run.capture;
+        const discard = () => { void api.desktop.capture.release(original.assetId, { userId: route.userId }).catch(() => {}); };
+        run.controller.signal.addEventListener("abort", discard, { once: true });
+        try {
+          const optimized = await captureOptimizer!.optimize!(optimizationRequest(settings, original, route.userId));
+          assertActive(run);
+          if (optimized.assetId !== original.assetId || optimized.connectionId !== connection.id
+            || optimized.kind !== message.kind || optimized.expiresAt <= now()) throw new DeskError("OPTIMIZATION_FAILED");
+          run.capture = optimized;
+        } finally { run.controller.signal.removeEventListener("abort", discard); }
+      }
       stage = "generating";
       send(run, { type: "status", stage });
       const generationTimer = setTimeout(() => { run.timedOut = true; run.controller.abort(); }, 90000);

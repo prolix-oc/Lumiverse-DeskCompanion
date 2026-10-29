@@ -35,6 +35,19 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
         <div class="dc-field"><span>Desktop display</span><select class="dc-native" data-role="device" aria-label="Desktop display"><option value="">Choose a display</option></select></div>
         <div class="dc-grid"><div class="dc-field"><span>Capture</span><select class="dc-native" data-role="kind" aria-label="Capture type"><option value="image">Screenshot</option><option value="video">Video clip</option></select></div><div class="dc-field" data-role="duration-field" hidden><span>Max clip duration (seconds)</span><input class="dc-native" data-role="duration" aria-label="Max clip duration" type="number" min="1" max="120" step="1" value="3" disabled></div></div>
         <p class="dc-note" data-role="capture-readiness" aria-live="polite"></p>
+        <details data-shared-section><summary>Optimize before sending</summary>
+          <div class="dc-toggle-row"><div><h3>Optimize before sending</h3><p class="dc-note">Reduce the attachment sent to your model. Adds processing time; the original desktop upload stays unchanged.</p></div><input class="dc-native" data-role="optimize-media" aria-label="Optimize before sending" type="checkbox"></div>
+          <div data-role="optimization-options" hidden>
+            <div class="dc-field"><span>Maximum long edge (pixels)</span><input class="dc-native" data-role="optimize-max-edge" aria-label="Maximum long edge" type="number" min="256" max="3840" step="1" value="1280"><p class="dc-note">Preserves aspect ratio and never enlarges the capture.</p></div>
+            <div data-role="video-optimization" hidden>
+              <div class="dc-grid"><div class="dc-field"><span>Frame rate (FPS)</span><input class="dc-native" data-role="video-fps" aria-label="Video frame rate" type="number" min="1" max="30" step="1" value="15"></div><div class="dc-field"><span>Video bitrate (kbps)</span><input class="dc-native" data-role="video-bitrate" aria-label="Video bitrate" type="number" min="128" max="8000" step="1" value="2500"></div></div>
+              <p class="dc-note">H.264 MP4 without audio. Lower FPS and bitrate make smaller clips; higher values preserve motion and text detail.</p>
+            </div>
+            <div data-role="image-optimization">
+              <div class="dc-grid"><div class="dc-field"><span>Image format</span><select class="dc-native" data-role="image-format" aria-label="Image format"><option value="jpeg">JPEG</option><option value="webp">WebP</option><option value="png">PNG (lossless)</option></select></div><div class="dc-field" data-role="image-quality-field"><span>Image quality (1–100)</span><input class="dc-native" data-role="image-quality" aria-label="Image quality" type="number" min="1" max="100" step="1" value="85"></div></div>
+            </div>
+          </div>
+        </details>
         <div class="dc-field"><span>Question or direction <span class="dc-optional">Optional</span></span><textarea class="dc-native" data-role="question" aria-label="Optional question or direction" placeholder="What would you like your character to react to?" maxlength="1200"></textarea></div>
         <div class="dc-field"><span>Conversation history (exchanges)</span><input class="dc-native" data-role="history-turns" aria-label="Conversation history exchanges" type="number" min="0" step="1" value="5"></div>
         <p class="dc-note">One exchange is your question and the character's reply. Text is saved for this account and character. Set 0 to disable history. Larger histories use more model context.</p>
@@ -100,6 +113,12 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
   const character = element<HTMLSelectElement>("character");
   const connection = element<HTMLSelectElement>("connection");
   const mediaResolution = element<HTMLSelectElement>("media-resolution");
+  const optimizeMedia = element<HTMLInputElement>("optimize-media");
+  const optimizeMaxEdge = element<HTMLInputElement>("optimize-max-edge");
+  const videoFps = element<HTMLInputElement>("video-fps");
+  const videoBitrate = element<HTMLInputElement>("video-bitrate");
+  const imageFormat = element<HTMLSelectElement>("image-format");
+  const imageQuality = element<HTMLInputElement>("image-quality");
   const device = element<HTMLSelectElement>("device");
   const kind = element<HTMLSelectElement>("kind");
   const duration = element<HTMLInputElement>("duration");
@@ -291,6 +310,9 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
   const settingsControls: Array<{ key: keyof CompanionSettings; control: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement }> = [
     { key: "characterId", control: character }, { key: "connectionId", control: connection }, { key: "deviceId", control: device },
     { key: "mediaResolution", control: mediaResolution },
+    { key: "optimizeMedia", control: optimizeMedia }, { key: "optimizeMaxEdge", control: optimizeMaxEdge },
+    { key: "videoFps", control: videoFps }, { key: "videoBitrateKbps", control: videoBitrate },
+    { key: "imageFormat", control: imageFormat }, { key: "imageQuality", control: imageQuality },
     { key: "kind", control: kind }, { key: "durationSeconds", control: duration }, { key: "historyTurns", control: historyTurns }, { key: "question", control: question },
     { key: "autoSpeak", control: autoSpeak }, { key: "voiceInput", control: voiceInput }, { key: "sttProvider", control: sttProvider }, { key: "sttId", control: stt },
     { key: "ttsId", control: tts },
@@ -300,7 +322,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     const current = settings();
     if (knownCharacters.has(current.characterId)) syncCharacters(current.characterId);
     for (const { key, control } of settingsControls) {
-      if (key === "autoSpeak" || key === "voiceInput") (control as HTMLInputElement).checked = current[key];
+      if (key === "autoSpeak" || key === "voiceInput" || key === "optimizeMedia") (control as HTMLInputElement).checked = current[key];
       else {
         control.value = String(current[key]);
         if (!current[key] && control.tagName === "SELECT" && (control as HTMLSelectElement).options.length === 2) (control as HTMLSelectElement).selectedIndex = 1;
@@ -484,6 +506,9 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
       .every((permission) => granted.includes(permission)) && (!video || granted.includes("screen_recording"));
     const supported = video ? chosenConnection?.video && chosenDevice?.video : chosenConnection?.image && chosenDevice?.image;
     const validDuration = Number.isInteger(Number(duration.value)) && Number(duration.value) >= 1 && Number(duration.value) <= 120;
+    const validOptimization = !optimizeMedia.checked || parseSettingsPatch({ optimizeMaxEdge: Number(optimizeMaxEdge.value),
+      ...(video ? { videoFps: Number(videoFps.value), videoBitrateKbps: Number(videoBitrate.value) }
+        : { imageFormat: imageFormat.value, ...(imageFormat.value === "png" ? {} : { imageQuality: Number(imageQuality.value) }) }) }) !== null;
     const validVoice = Boolean(outputAPI) && granted.includes("media") && speechConnections.some((entry) => entry.id === tts.value);
     const provider = inputProviders.find((entry) => entry.id === sttProvider.value);
     const connectionInput = sttProvider.value === "connection";
@@ -491,6 +516,12 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     const validInput = Boolean(providerReady) && Boolean(inputAPI) && granted.includes("media")
       && (!connectionInput || transcriptionConnections.some((entry) => entry.id === stt.value));
     for (const control of [character, connection, device, kind, question, historyTurns, mediaResolution, tts, autoSpeak, sttProvider, stt]) control.disabled = busy;
+    optimizeMedia.disabled = busy;
+    for (const control of [optimizeMaxEdge, videoFps, videoBitrate, imageFormat, imageQuality]) control.disabled = busy || !optimizeMedia.checked;
+    element("optimization-options").hidden = !optimizeMedia.checked;
+    element("video-optimization").hidden = !video;
+    element("image-optimization").hidden = video;
+    element("image-quality-field").hidden = imageFormat.value === "png";
     element("media-resolution-field").hidden = !chosenConnection || !supportsGeminiMediaResolution(chosenConnection.provider, chosenConnection.model);
     element<HTMLButtonElement>("clear-history").disabled = busy || !snapshot || !current.characterId;
     voiceInput.disabled = busy || !inputAPI;
@@ -511,7 +542,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     element("duration-field").hidden = !video;
     const needsSettings = !hasGrants || !supported || !character.value || !current.characterId || !current.connectionId || !current.deviceId
       || character.value !== current.characterId || connection.value !== current.connectionId || device.value !== current.deviceId
-      || question.value.length > MAX_QUESTION || (video && !validDuration) || (autoSpeak.checked && !validVoice);
+      || question.value.length > MAX_QUESTION || (video && !validDuration) || !validOptimization || (autoSpeak.checked && !validVoice);
     const blocked = !snapshot || subscription !== null || busy || saving !== null || Object.keys(pendingPatch).length > 0 || needsSettings;
     canQuickShare = !blocked;
     canShare = !blocked && (!voiceInput.checked || validInput);
@@ -532,7 +563,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     element("check-devices").hidden = surface !== "widget" || busy || Boolean(chosenDevice) || !hasGrants;
     element<HTMLButtonElement>("check-devices").disabled = catalogId !== null || devicesId !== null;
     badge.dataset.busy = String(busy);
-    badge.textContent = busy ? stage === "listening" ? "Listening" : stage === "transcribing" ? "Transcribing" : stage === "consent" ? "Capturing" : stage === "generating" ? "Thinking" : stage === "cancelling" ? "Cancelling" : "Checking"
+    badge.textContent = busy ? stage === "listening" ? "Listening" : stage === "transcribing" ? "Transcribing" : stage === "consent" ? "Capturing" : stage === "optimizing" ? "Optimizing" : stage === "generating" ? "Thinking" : stage === "cancelling" ? "Cancelling" : "Checking"
       : subscription ? "Reconnecting" : !snapshot ? "Connecting" : !hasGrants ? "Permissions" : !catalog ? "Loading" : saving || Object.keys(pendingPatch).length ? "Saving" : needsSettings || voiceInput.checked && !validInput ? "Setup needed" : "Ready";
     const nativeStatus = approval?.key === approvalKey() ? approval.status : null;
     const readiness = element("capture-readiness");
@@ -799,6 +830,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     if (message.type === "status") {
       stage = message.stage;
       const messages = { checking: "Verifying the character, model, and desktop for your account…", consent: CAPTURE_PENDING,
+        optimizing: "Optimizing the capture before sending it to your model…",
         generating: "The approved capture is attached privately. Your character is thinking…", cancelling: "Share cancelled. Waiting for any pending Desktop capture to finish or stop." };
       notice(message.message ?? messages[message.stage]);
     } else if (message.type === "text" && stage !== "cancelling") reply.textContent = message.text;
@@ -912,8 +944,8 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
   listen(element("settings"), "click", () => { options.openSettings ? options.openSettings() : send({ type: "open-settings" }); });
   listen(element("character-voice"), "click", () => applyCharacterVoice());
   for (const { key, control } of settingsControls) listen(control, "input", () => {
-    const value = key === "autoSpeak" || key === "voiceInput" ? (control as HTMLInputElement).checked
-      : ["durationSeconds", "historyTurns"].includes(key) ? Number(control.value) : control.value;
+    const value = key === "autoSpeak" || key === "voiceInput" || key === "optimizeMedia" ? (control as HTMLInputElement).checked
+      : ["durationSeconds", "historyTurns", "optimizeMaxEdge", "videoFps", "videoBitrateKbps", "imageQuality"].includes(key) ? Number(control.value) : control.value;
     queueSettings({ [key]: value });
     if (key === "characterId") { clearReply(); applyCharacterVoice(); }
     updateControls();

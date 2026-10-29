@@ -198,6 +198,34 @@ async function widget(options: { stt?: Promise<Response>; silence?: Promise<void
 }
 
 describe("configured widget share pipeline", () => {
+  test("drawer optimization controls persist and apply before generation, with PNG hiding lossy quality", async () => {
+    const screen = await widget();
+    Object.assign(screen.host.mutable.host.capabilities, { "desktop-capture-optimize-v1": 1 });
+    const settingsElement = (role: string) => screen.settings.panel.querySelector<HTMLElement>(`[data-role="${role}"]`)!;
+    try {
+      expect(settingsElement("optimization-options").hidden).toBe(true);
+      screen.components.find(c => c.options.ariaLabel === "Optimize before sending")!.options.onChange(true);
+      await screen.synchronize();
+      expect(settingsElement("optimization-options").hidden).toBe(false);
+      for (const [label, value] of [["Maximum long edge", 960], ["Image quality", 72], ["Image format", "webp"]] as const) {
+        screen.components.find(c => c.options.ariaLabel === label)!.options.onChange(value);
+      }
+      await screen.synchronize();
+      expect(screen.outgoing.filter(m => m.type === "configure").at(-1).patch).toMatchObject({ optimizeMaxEdge: 960, imageQuality: 72, imageFormat: "webp" });
+      screen.element<HTMLButtonElement>("observe").click(); await settle(); await screen.approve();
+      expect(screen.host.optimized).toEqual([{ assetId: screen.host.capture.assetId, connectionId: "model-a", userId: "user-a", kind: "image", maxEdge: 960, quality: 72, format: "webp" }]);
+      expect(screen.host.generations).toHaveLength(1);
+      screen.components.find(c => c.options.ariaLabel === "Image format")!.options.onChange("png"); await screen.synchronize();
+      expect(settingsElement("image-quality-field").hidden).toBe(true);
+      screen.components.find(c => c.options.ariaLabel === "Capture type")!.options.onChange("video"); await screen.synchronize();
+      expect(settingsElement("video-optimization").hidden).toBe(false);
+      expect(settingsElement("image-optimization").hidden).toBe(true);
+      screen.components.find(c => c.options.ariaLabel === "Video frame rate")!.options.onChange(10);
+      screen.components.find(c => c.options.ariaLabel === "Video bitrate")!.options.onChange(1600);
+      await screen.synchronize();
+      expect(screen.outgoing.filter(m => m.type === "configure").at(-1).patch).toMatchObject({ videoFps: 10, videoBitrateKbps: 1600 });
+    } finally { await screen.close(); }
+  });
   test("Gemini media detail is optional, saves to shared settings, and reaches the request", async () => {
     const screen = await widget();
     try {

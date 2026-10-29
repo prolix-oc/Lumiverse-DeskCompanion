@@ -9,6 +9,12 @@ export interface CompanionSettings {
   durationSeconds: number;
   historyTurns: number;
   mediaResolution: "inherit" | "unspecified" | "low" | "medium" | "high";
+  optimizeMedia: boolean;
+  optimizeMaxEdge: number;
+  videoFps: number;
+  videoBitrateKbps: number;
+  imageFormat: "jpeg" | "webp" | "png";
+  imageQuality: number;
   question: string;
   autoSpeak: boolean;
   voiceInput: boolean;
@@ -22,11 +28,13 @@ export interface CompanionSettings {
 export const DEFAULT_SETTINGS: Readonly<CompanionSettings> = Object.freeze({
   characterId: "", connectionId: "", deviceId: "", kind: "image", durationSeconds: 3, historyTurns: 5,
   mediaResolution: "inherit",
+  optimizeMedia: false, optimizeMaxEdge: 1280, videoFps: 15, videoBitrateKbps: 2500,
+  imageFormat: "jpeg", imageQuality: 85,
   question: "", autoSpeak: false, voiceInput: false, sttProvider: "connection", sttId: "",
   ttsId: "", voice: "", speed: 1,
 });
 
-export type CompanionStage = "idle" | "listening" | "transcribing" | "checking" | "consent" | "generating" | "cancelling";
+export type CompanionStage = "idle" | "listening" | "transcribing" | "checking" | "consent" | "optimizing" | "generating" | "cancelling";
 
 export interface CompanionActivity {
   requestId: string | null;
@@ -70,7 +78,13 @@ export function parseSettingsPatch(value: unknown): Partial<CompanionSettings> |
       if (setting !== "connection" && setting !== "whistle" && setting !== "webspeech") return null;
     } else if (key === "mediaResolution") {
       if (typeof setting !== "string" || !["inherit", "unspecified", "low", "medium", "high"].includes(setting)) return null;
-    } else if (key === "autoSpeak" || key === "voiceInput") {
+    } else if (key === "imageFormat") {
+      if (typeof setting !== "string" || !["jpeg", "webp", "png"].includes(setting)) return null;
+    } else if (["optimizeMaxEdge", "videoFps", "videoBitrateKbps", "imageQuality"].includes(key)) {
+      const [min, max] = key === "optimizeMaxEdge" ? [256, 3840] : key === "videoFps" ? [1, 30]
+        : key === "videoBitrateKbps" ? [128, 8000] : [1, 100];
+      if (!Number.isInteger(setting) || Number(setting) < min! || Number(setting) > max!) return null;
+    } else if (key === "autoSpeak" || key === "voiceInput" || key === "optimizeMedia") {
       if (typeof setting !== "boolean") return null;
     } else if (key === "question" || key === "voice") {
       if (typeof setting !== "string" || setting.length > (key === "question" ? MAX_QUESTION : 256)) return null;
@@ -94,6 +108,9 @@ export function parseSettings(value: unknown): CompanionSettings | null {
   if (!Object.hasOwn(normalized, "sttProvider")) normalized.sttProvider = "connection";
   if (!Object.hasOwn(normalized, "historyTurns")) normalized.historyTurns = DEFAULT_SETTINGS.historyTurns;
   if (!Object.hasOwn(normalized, "mediaResolution")) normalized.mediaResolution = DEFAULT_SETTINGS.mediaResolution;
+  for (const key of ["optimizeMedia", "optimizeMaxEdge", "videoFps", "videoBitrateKbps", "imageFormat", "imageQuality"] as const) {
+    if (!Object.hasOwn(normalized, key)) normalized[key] = DEFAULT_SETTINGS[key];
+  }
   const patch = parseSettingsPatch(normalized);
   return patch && Object.keys(patch).length === Object.keys(DEFAULT_SETTINGS).length ? { ...DEFAULT_SETTINGS, ...patch } : null;
 }

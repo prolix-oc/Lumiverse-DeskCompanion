@@ -133,12 +133,40 @@ model input processing, while the captured video remains H.264 MP4 at up to
 routes; other providers receive no Gemini-specific parameter. Updated backend and
 Desktop builds are required for two-minute clips and the 128 MiB video limit.
 
+## Capture optimization
+
+Open **Companion → Optimize before sending** in the drawer and turn on the switch.
+It defaults to off. Existing installations retain their original capture quality.
+
+| Control | Default when enabled | Range/options |
+| --- | --- | --- |
+| Maximum long edge | 1280 px | 256–3840 px, aspect ratio preserved, no upscaling |
+| Video frame rate | 15 FPS | 1–30 FPS |
+| Video bitrate | 2500 kbps | 128–8000 kbps, silent H.264 MP4 |
+| Screenshot format | JPEG | JPEG, WebP, PNG |
+| Screenshot quality | 85 | 1–100 for JPEG/WebP; PNG is lossless |
+
+Controls follow the selected capture type and synchronize across this account's
+drawer/widget views. The widget shows **Optimizing** after capture and before model
+generation. Gemini media detail remains a separate model input setting.
+
+This requires an updated backend advertising `desktop-capture-optimize-v1` and
+FFmpeg on that backend for video. No additional Desktop build is needed. Conversion
+runs after the original capture upload, so it reduces the model attachment rather
+than the initial Desktop upload. It can add processing time and lossy formats can
+reduce small-text detail; bitrate is a target, not a guaranteed file-size ceiling.
+The backend keeps bytes private and replaces the same scoped, expiring handle only
+after successful conversion. Cancel releases that handle and aborts video processing.
+Conversion failures stop sharing without sending the unoptimized capture or retrying.
+Older hosts reject enabled optimization before requesting a capture; turn the switch
+off to keep using the baseline flow.
+
 ## API integration
 
 | Feature | Implementation |
 | --- | --- |
 | System floating widgets | `ctx.ui.createFloatWidget`, distinct `setup`/`setupWidget` entries, host-managed pop-out and scoped return handling |
-| Desktop capture | Worker-only `spindle.desktop.capture.listDevices`, `getApprovalStatus`, `request`, and `release`; opaque single-use handles never go to the frontend |
+| Desktop capture | Worker-only `spindle.desktop.capture.listDevices`, `getApprovalStatus`, `request`, `finish`, `optimize`, and `release`; opaque single-use handles never go to the frontend |
 | Keyboard shortcuts | `spindle.commands.register/onInvoked/unregister`, authenticated invocation origin, and feature-detected `ctx.components.mountKeybindingEditor` in the settings panel |
 | Generation assembly | `assembleMessages` creates provider-neutral messages from the owned character card, user question, and `{ type: 'desktop_capture', asset_id }`; `spindle.generate.rawStream` dispatches them through the exact selected connection |
 | Character API | `spindle.characters.list/get` with the trusted frontend sender's user ID; reference fields are bounded and included only in the worker's prompt |
