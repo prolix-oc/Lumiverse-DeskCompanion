@@ -650,6 +650,9 @@ describe("configured widget share pipeline", () => {
   test("Whistle works without saved STT connections and a shortcut transcribes exactly once through Spindle", async () => {
     const transcript = deferred<Response>(); const screen = await widget({ noConnections: true, stt: transcript.promise });
     try {
+      const question = screen.element<HTMLTextAreaElement>("question");
+      question.value = "Look at this page.";
+      question.dispatchEvent(new screen.dom.window.Event("input")); await screen.synchronize();
       const provider = screen.element<HTMLSelectElement>("stt-provider");
       expect([...provider.options].find((option) => option.value === "whistle")?.disabled).toBe(false);
       provider.value = "whistle"; provider.dispatchEvent(new screen.dom.window.Event("input")); await screen.synchronize();
@@ -664,7 +667,10 @@ describe("configured widget share pipeline", () => {
       expect(screen.element("status").textContent).toContain("Loading Whistle");
       await screen.host.invoke(); await settle(); expect(screen.recognitions).toHaveLength(1);
       transcript.resolve(Response.json({ text: "What changed?" })); await settle(); await screen.approve();
-      expect(screen.host.generations[0].messages[1].content[0].text).toBe("What changed?");
+      expect(screen.host.generations[0].messages[1].content[0].text).toBe("Look at this page.\n\nWhat changed?");
+      expect(screen.host.generations[0].messages[0].content).toContain(CHARACTER.description);
+      expect(screen.host.generations[0].messages[0].content).toContain(CHARACTER.personality);
+      expect(screen.host.generations[0].messages[0].content).toContain(`You are ${CHARACTER.name},`);
       expect(screen.speechCalls).toHaveLength(1); expect(screen.requests).toHaveLength(0);
     } finally { transcript.resolve(Response.json({ text: "late" })); await screen.close(); }
   });
@@ -947,7 +953,7 @@ describe("configured widget share pipeline", () => {
     try {
       screen.element<HTMLButtonElement>("observe").click(); await settle();
       expect(screen.element("badge").textContent).toBe("Capturing");
-      expect(screen.element("status").textContent).toContain("If native setup opens");
+      expect(screen.element("status").textContent).toContain("Capturing on your desktop");
       expect(screen.element("status").textContent).not.toContain("Preview, then Share");
       const queries = screen.host.gets.length;
       await screen.discover(); expect(screen.host.gets).toHaveLength(queries);

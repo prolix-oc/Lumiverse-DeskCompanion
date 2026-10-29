@@ -529,8 +529,8 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
       : nativeStatus?.approval === "unavailable" ? "Cannot check capture approval. Check Desktop's connection."
       : nativeStatus?.source === "permission_required" ? "Desktop needs screen-recording permission. Open native capture setup."
       : nativeStatus?.source === "missing" ? "Your saved source is unavailable. Choose a source on your next share."
-      : nativeStatus?.approval === "remembered" && nativeStatus.source === "ready" ? "Screen source remembered."
-      : nativeStatus?.approval === "required" ? chosenDevice?.displayId ? "Approve this display in Desktop on your next share." : "Choose a screen source on your next share."
+      : nativeStatus?.approval === "remembered" && nativeStatus.source === "ready" ? chosenDevice?.displayId && chosenDevice.platform === "windows" ? "Display ready." : "Screen source remembered."
+      : nativeStatus?.approval === "required" ? chosenDevice?.displayId && chosenDevice.platform === "windows" ? "This display uses your Desktop tray and extension permissions." : "Choose a screen source on your next share."
       : "";
     const needsAttention = !hasGrants || !catalog || !chosenDevice || needsSettings || voiceInput.checked && !validInput
       || nativeStatus?.approval === "paused" || nativeStatus?.approval === "unavailable" || nativeStatus?.source === "permission_required" || nativeStatus?.source === "missing";
@@ -563,7 +563,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     stopSpeech();
     if (runId && stage !== "cancelling") {
       send({ type: "cancel", targetId: runId }); stage = "cancelling";
-      notice("Generation is being cancelled. A pending native capture must be stopped with the native panel's Stop & Discard control.");
+      notice("Share cancelled. Waiting for any pending Desktop capture to finish or stop. Turn off screen capture in the Desktop tray to stop it immediately.");
       updateControls();
     }
     const targetId = pendingBegin?.id ?? snapshot?.activity.requestId;
@@ -776,7 +776,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     if (message.type === "status") {
       stage = message.stage;
       const messages = { checking: "Verifying the character, model, and desktop for your account…", consent: CAPTURE_PENDING,
-        generating: "The approved capture is attached privately. Your character is thinking…", cancelling: "Generation cancelled. Use Stop & Discard in any native capture panel still open; waiting for that request to finish." };
+        generating: "The approved capture is attached privately. Your character is thinking…", cancelling: "Share cancelled. Waiting for any pending Desktop capture to finish or stop." };
       notice(messages[message.stage]);
     } else if (message.type === "text" && stage !== "cancelling") reply.textContent = message.text;
     else if (message.type === "complete") {

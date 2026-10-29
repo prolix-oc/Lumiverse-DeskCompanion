@@ -62,7 +62,7 @@ function safeLabel(value, maximum = 120) {
 }
 
 // src/capture-flow.ts
-var CAPTURE_PENDING = "Capturing on your desktop. If native setup opens, choose a source and optionally remember it for future shares. Use the native Stop & Discard control to stop.";
+var CAPTURE_PENDING = "Capturing on your desktop…";
 
 // src/speech.ts
 var MAX_SPEECH_CHARS = 2400;
@@ -979,7 +979,7 @@ function mountView(ctx, root, options = {}) {
     badge.textContent = busy ? stage === "listening" ? "Listening" : stage === "transcribing" ? "Transcribing" : stage === "consent" ? "Capturing" : stage === "generating" ? "Thinking" : stage === "cancelling" ? "Cancelling" : "Checking" : subscription ? "Reconnecting" : !snapshot ? "Connecting" : !hasGrants ? "Permissions" : !catalog ? "Loading" : saving || Object.keys(pendingPatch).length ? "Saving" : needsSettings || voiceInput.checked && !validInput ? "Setup needed" : "Ready";
     const nativeStatus = approval?.key === approvalKey() ? approval.status : null;
     const readiness = element("capture-readiness");
-    readiness.textContent = !hasGrants ? "Grant permissions to enable screen sharing." : !catalog ? "Finding desktops…" : !chosenDevice ? current.deviceId ? "Your saved desktop is offline. Reconnect it or choose a desktop in Settings." : "Set Up Screen Capture in Lumiverse Desktop to connect a desktop." : chosenConnection && !supported ? `This model or desktop does not support ${video ? "video clips" : "screenshots"}. Change the model or capture type in Settings.` : autoSpeak.checked && !validVoice ? "Choose a voice connection in Speech, or turn off spoken replies." : voiceInput.checked && !validInput ? "Check speech recognition in Speech, or turn off voice input." : needsSettings ? "Choose a character, model connection, and desktop in Settings." : nativeStatus?.approval === "paused" ? "Capture requests are paused. Resume them in the Desktop tray." : nativeStatus?.approval === "unavailable" ? "Cannot check capture approval. Check Desktop's connection." : nativeStatus?.source === "permission_required" ? "Desktop needs screen-recording permission. Open native capture setup." : nativeStatus?.source === "missing" ? "Your saved source is unavailable. Choose a source on your next share." : nativeStatus?.approval === "remembered" && nativeStatus.source === "ready" ? "Screen source remembered." : nativeStatus?.approval === "required" ? chosenDevice?.displayId ? "Approve this display in Desktop on your next share." : "Choose a screen source on your next share." : "";
+    readiness.textContent = !hasGrants ? "Grant permissions to enable screen sharing." : !catalog ? "Finding desktops…" : !chosenDevice ? current.deviceId ? "Your saved desktop is offline. Reconnect it or choose a desktop in Settings." : "Set Up Screen Capture in Lumiverse Desktop to connect a desktop." : chosenConnection && !supported ? `This model or desktop does not support ${video ? "video clips" : "screenshots"}. Change the model or capture type in Settings.` : autoSpeak.checked && !validVoice ? "Choose a voice connection in Speech, or turn off spoken replies." : voiceInput.checked && !validInput ? "Check speech recognition in Speech, or turn off voice input." : needsSettings ? "Choose a character, model connection, and desktop in Settings." : nativeStatus?.approval === "paused" ? "Capture requests are paused. Resume them in the Desktop tray." : nativeStatus?.approval === "unavailable" ? "Cannot check capture approval. Check Desktop's connection." : nativeStatus?.source === "permission_required" ? "Desktop needs screen-recording permission. Open native capture setup." : nativeStatus?.source === "missing" ? "Your saved source is unavailable. Choose a source on your next share." : nativeStatus?.approval === "remembered" && nativeStatus.source === "ready" ? chosenDevice?.displayId && chosenDevice.platform === "windows" ? "Display ready." : "Screen source remembered." : nativeStatus?.approval === "required" ? chosenDevice?.displayId && chosenDevice.platform === "windows" ? "This display uses your Desktop tray and extension permissions." : "Choose a screen source on your next share." : "";
     const needsAttention = !hasGrants || !catalog || !chosenDevice || needsSettings || voiceInput.checked && !validInput || nativeStatus?.approval === "paused" || nativeStatus?.approval === "unavailable" || nativeStatus?.source === "permission_required" || nativeStatus?.source === "missing";
     readiness.hidden = busy || !readiness.textContent || surface === "widget" && !needsAttention;
     element("sync-status").textContent = subscription ? "Reconnecting…" : !snapshot ? "Connecting…" : saving || Object.keys(pendingPatch).length ? "Saving…" : "Saved";
@@ -1016,7 +1016,7 @@ function mountView(ctx, root, options = {}) {
     if (runId && stage !== "cancelling") {
       send({ type: "cancel", targetId: runId });
       stage = "cancelling";
-      notice("Generation is being cancelled. A pending native capture must be stopped with the native panel's Stop & Discard control.");
+      notice("Share cancelled. Waiting for any pending Desktop capture to finish or stop. Turn off screen capture in the Desktop tray to stop it immediately.");
       updateControls();
     }
     const targetId = pendingBegin?.id ?? snapshot?.activity.requestId;
@@ -1347,7 +1347,7 @@ function mountView(ctx, root, options = {}) {
         checking: "Verifying the character, model, and desktop for your account…",
         consent: CAPTURE_PENDING,
         generating: "The approved capture is attached privately. Your character is thinking…",
-        cancelling: "Generation cancelled. Use Stop & Discard in any native capture panel still open; waiting for that request to finish."
+        cancelling: "Share cancelled. Waiting for any pending Desktop capture to finish or stop."
       };
       notice(messages[message.stage]);
     } else if (message.type === "text" && stage !== "cancelling")
