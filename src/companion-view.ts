@@ -131,6 +131,9 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
   let completedVoice: VoiceRef | null = null;
   let speechConnections: SpeechConnection[] = [];
   let transcriptionConnections: TranscriptionConnection[] = [];
+  let speechConnectionsFailed = false;
+  let transcriptionConnectionsFailed = false;
+  let speechDiscovery: { controller: AbortController; timer: number } | null = null;
   let inputController: AbortController | null = null;
   let inputMessage = "";
   const automaticSpeech = new AutomaticShareSpeech();
@@ -144,7 +147,6 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
   let pendingBegin: { id: string; resolve: () => void; reject: (error: Error) => void } | null = null;
   let initializeVoice = false;
   let automaticRequestId: string | null = null;
-  const listingController = new AbortController();
   const cleanups: Array<() => void> = [];
   const destroySections = surface === "settings" ? mountSharedSections(ctx, configuration) : () => {};
   const knownCharacters = new Map<string, CharacterOption>();
@@ -180,6 +182,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
   function activateTab(tab: HTMLButtonElement): void {
     for (const button of tabs) { const active = button === tab; button.setAttribute("aria-selected", String(active)); button.tabIndex = active ? 0 : -1; }
     for (const pane of configuration.querySelectorAll<HTMLElement>("[data-pane]")) pane.hidden = pane.dataset.pane !== tab.dataset.tab;
+    if (tab.dataset.tab === "speech") refreshSpeechConnections();
   }
   for (const [index, tab] of tabs.entries()) {
     const pane = configuration.querySelector<HTMLElement>(`[data-pane="${tab.dataset.tab}"]`)!;
@@ -400,7 +403,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
   }
 
   function initializeCharacterVoice(): void {
-    if (!initializeVoice || surface !== "settings" || !selectedCharacter() || !speechConnections.length) return;
+    if (!initializeVoice || surface !== "settings" || isBusy() || !selectedCharacter() || !speechConnections.length) return;
     initializeVoice = false; applyCharacterVoice(true);
   }
 
@@ -412,6 +415,46 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
       option.disabled = !provider || !provider.available && !(provider.id === "connection" && provider.unavailableReason === "connectionRequired");
       option.textContent = `${provider?.name ?? (option.value === "whistle" ? "Whistle (on this device)" : option.value === "webspeech" ? "Web Speech" : "STT connection")}${option.disabled ? " · unavailable" : ""}`;
     }
+  }
+
+  function refreshSpeechConnections(force = false): void {
+    if (disposed || disposing || speechDiscovery && !force) return;
+    if (speechDiscovery) { speechDiscovery.controller.abort(); window.clearTimeout(speechDiscovery.timer); }
+    const controller = new AbortController();
+    let ttsPending = true, sttPending = true;
+    const timer = window.setTimeout(() => {
+      if (speechDiscovery?.controller !== controller) return;
+      controller.abort(); speechDiscovery = null;
+      if (ttsPending) speechConnectionsFailed = true;
+      if (sttPending) transcriptionConnectionsFailed = true;
+      updateControls();
+    }, 15000);
+    speechDiscovery = { controller, timer };
+    const current = () => !disposed && !controller.signal.aborted && speechDiscovery?.controller === controller;
+    const speechListing = listSpeechConnections(ctx, controller.signal).then(connections => {
+      if (!current()) return;
+      ttsPending = false; speechConnectionsFailed = false;
+      if (JSON.stringify(connections) !== JSON.stringify(speechConnections)) {
+        speechConnections = connections;
+        fill(tts, connections.map(entry => ({ id: entry.id, label: `${entry.name} · ${entry.provider}` })), "Choose a TTS connection", settings().ttsId);
+        chooseDefaults(); initializeCharacterVoice();
+      }
+      updateControls();
+    }).catch(() => { if (current()) { ttsPending = false; speechConnectionsFailed = true; updateControls(); } });
+    const inputListing = listTranscriptionConnections(ctx, controller.signal).then(connections => {
+      if (!current()) return;
+      sttPending = false; transcriptionConnectionsFailed = false;
+      if (JSON.stringify(connections) !== JSON.stringify(transcriptionConnections)) {
+        transcriptionConnections = connections;
+        fill(stt, connections.map(entry => ({ id: entry.id, label: `${entry.name} · ${entry.provider}` })), "Choose an STT connection", settings().sttId);
+        chooseDefaults();
+      }
+      discoverInputProviders(); updateControls();
+    }).catch(() => { if (current()) { sttPending = false; transcriptionConnectionsFailed = true; updateControls(); } });
+    void Promise.allSettled([speechListing, inputListing]).finally(() => {
+      window.clearTimeout(timer);
+      if (speechDiscovery?.controller === controller) speechDiscovery = null;
+    });
   }
 
   function updateControls(): void {
@@ -435,8 +478,11 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     element("voice-options").hidden = !voiceInput.checked;
     element("stt-connection").hidden = !connectionInput;
     element("tts-guidance").textContent = !outputAPI ? "Update Lumiverse to enable spoken replies."
-      : !granted.includes("media") ? "Use Permissions to grant Media for speech playback." : "Voice and playback settings are managed in Voice & Speech.";
+      : !granted.includes("media") ? "Use Permissions to grant Media for speech playback."
+      : speechConnectionsFailed ? "Voice connections could not load. Use Refresh to retry."
+      : "Voice and playback settings are managed in Voice & Speech.";
     element("stt-guidance").textContent = inputAPI && !granted.includes("media") ? "Use Permissions to grant Media for voice input."
+      : connectionInput && transcriptionConnectionsFailed ? "STT connections could not load. Use Refresh to retry."
       : !providerReady ? provider?.unavailableReason === "hostUpdate" ? "Update Lumiverse to use speech recognition through Spindle."
         : "Unavailable in this window. Choose another provider or check Voice & Speech."
       : connectionInput ? "Audio is sent to this connection. Listening ends on silence."
@@ -648,6 +694,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
         if (devicesTimeout !== null) window.clearTimeout(devicesTimeout);
       }
       const oldCharacter = snapshot?.settings.characterId;
+      const oldVoice = snapshot?.settings.ttsId, oldTranscription = snapshot?.settings.sttId;
       snapshot = incoming;
       mountShortcuts();
       applySettings(); chooseDefaults();
@@ -671,6 +718,8 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
       }
       if (first || restarted || oldCharacter !== incoming.settings.characterId && !knownCharacters.has(incoming.settings.characterId)) refresh(0);
       if (catalog && incoming.settings.deviceId && !catalog.devices.some((entry) => entry.id === incoming.settings.deviceId)) discoverDevices();
+      if (oldVoice !== incoming.settings.ttsId && incoming.settings.ttsId && !speechConnections.some(entry => entry.id === incoming.settings.ttsId)
+        || oldTranscription !== incoming.settings.sttId && incoming.settings.sttId && !transcriptionConnections.some(entry => entry.id === incoming.settings.sttId)) refreshSpeechConnections();
       flushSettings(); updateControls(); return;
     }
     if (message.type === "error" && pendingBegin?.id === message.id) {
@@ -824,7 +873,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
   listen(element("observe"), "click", () => { void share(); });
   listen(element("cancel"), "click", () => cancel());
   listen(element("clear"), "click", () => { cancel(); clearReply(); send({ type: "clear-state" }); });
-  listen(element("refresh"), "click", () => { retainSettingsEdits(); subscribe(); refresh(); });
+  listen(element("refresh"), "click", () => { retainSettingsEdits(); subscribe(); refresh(); refreshSpeechConnections(true); });
   listen(element("check-devices"), "click", () => { if (catalog) discoverDevices(); else refresh(); });
   listen(element("shortcut-action"), "change", () => {
     for (const cleanup of shortcutCleanups.splice(0)) cleanup();
@@ -843,7 +892,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
   });
   listen(element("grant"), "click", () => {
     void ctx.permissions.request([...REQUIRED_PERMISSIONS, "screen_recording", "media"], { reason: "Desk Companion uses Media for optional voice input and playback, plus grants to select a character, request desktop capture with native approval, and ask your chosen model." })
-      .then((permissions) => { if (!disposed) { granted = permissions; refresh(); updateControls(); } })
+      .then((permissions) => { if (!disposed) { granted = permissions; refresh(); refreshSpeechConnections(true); updateControls(); } })
       .catch(() => { if (!disposed) notice("Permission request was declined. An administrator/owner must approve capture grants.", true); });
   });
   cleanups.push(ctx.events.on("SPINDLE_PERMISSION_CHANGED", (payload) => {
@@ -856,28 +905,12 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
       catalogId = null; catalog = null; knownCharacters.clear(); characterChoices = []; characterTotal = 0; characterOffset = 0;
       fill(character, [], "Choose a character"); cancel(); clearReply();
     }
-    void ctx.permissions.getGranted().then((permissions) => { if (!disposed) { granted = permissions; refresh(); updateControls(); } }).catch(() => {});
+    void ctx.permissions.getGranted().then((permissions) => { if (!disposed) { granted = permissions; refresh(); refreshSpeechConnections(true); updateControls(); } }).catch(() => {});
   }));
   void ctx.permissions.getGranted().then((permissions) => { if (!disposed) { granted = permissions; subscribe(); updateControls(); } })
     .catch(() => { if (!disposed) notice("Cannot read grants. Check the extension's permissions.", true); });
-  const listingTimeout = window.setTimeout(() => listingController.abort(), 15000);
-  const speechListing = listSpeechConnections(ctx, listingController.signal).then((connections) => {
-    if (disposed) return;
-    speechConnections = connections;
-    fill(tts, connections.map((entry) => ({ id: entry.id, label: `${entry.name} · ${entry.provider}` })), "Choose a TTS connection", settings().ttsId);
-    chooseDefaults();
-    initializeCharacterVoice();
-    updateControls();
-  }).catch(() => { if (!disposed) element("speech-status").textContent = "Voice connections could not be loaded. Reopen settings to retry."; });
   discoverInputProviders();
-  const inputListing = listTranscriptionConnections(ctx, listingController.signal).then((connections) => {
-    if (disposed) return;
-    transcriptionConnections = connections;
-    fill(stt, connections.map((entry) => ({ id: entry.id, label: `${entry.name} · ${entry.provider}` })), "Choose an STT connection", settings().sttId);
-    chooseDefaults();
-    updateControls();
-  }).catch(() => { if (!disposed) element("input-status").textContent = "STT connections could not be loaded. Choose Whistle or reopen settings to retry."; });
-  void Promise.allSettled([speechListing, inputListing]).finally(() => window.clearTimeout(listingTimeout));
+  refreshSpeechConnections();
   const resynchronize = () => {
     if (disposed || disposing) return;
     retainSettingsEdits();
@@ -888,7 +921,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     catalogTimeout = null; devicesTimeout = null; catalogId = null; devicesId = null;
     if (approvalQuery) window.clearTimeout(approvalQuery.timer);
     approvalQuery = null; approval = null; approvalCheckedKey = "";
-    subscribe(); refresh(); updateControls();
+    subscribe(); refresh(); refreshSpeechConnections(true); updateControls();
   };
   cleanups.push(ctx.events.on("CONNECTED", payload => {
     // The host also emits an empty local socket-open event; wait for its
@@ -900,6 +933,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     if (disposed || document.visibilityState === "hidden") return;
     discoverInputProviders();
     if (catalog) discoverDevices(); else refresh();
+    refreshSpeechConnections();
     updateControls();
   };
   window.addEventListener("pageshow", restorePage);
@@ -913,7 +947,9 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     disposing = true;
     cancel(false);
     send({ type: "unsubscribe" });
-    disposed = true; listingController.abort(); stopSpeech();
+    disposed = true;
+    if (speechDiscovery) { speechDiscovery.controller.abort(); window.clearTimeout(speechDiscovery.timer); speechDiscovery = null; }
+    stopSpeech();
     pendingBegin?.reject(new Error("Companion window closed.")); pendingBegin = null;
     if (saveTimer !== null) window.clearTimeout(saveTimer);
     if (saveTimeout !== null) window.clearTimeout(saveTimeout);
@@ -924,7 +960,6 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     if (searchTimer !== null) window.clearTimeout(searchTimer);
     resetCharacterRequest();
     if (approvalQuery) window.clearTimeout(approvalQuery.timer);
-    window.clearTimeout(listingTimeout);
     for (const cleanup of shortcutCleanups.splice(0)) cleanup();
     for (const cleanup of cleanups.splice(0)) cleanup();
     completedText = ""; completedVoice = null; catalog = null;

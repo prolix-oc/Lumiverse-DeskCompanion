@@ -516,6 +516,9 @@ function mountView(ctx, root, options = {}) {
   let completedVoice = null;
   let speechConnections = [];
   let transcriptionConnections = [];
+  let speechConnectionsFailed = false;
+  let transcriptionConnectionsFailed = false;
+  let speechDiscovery = null;
   let inputController = null;
   let inputMessage = "";
   const automaticSpeech = new AutomaticShareSpeech;
@@ -529,7 +532,6 @@ function mountView(ctx, root, options = {}) {
   let pendingBegin = null;
   let initializeVoice = false;
   let automaticRequestId = null;
-  const listingController = new AbortController;
   const cleanups = [];
   const destroySections = surface === "settings" ? mountSharedSections(ctx, configuration) : () => {};
   const knownCharacters = new Map;
@@ -583,6 +585,8 @@ function mountView(ctx, root, options = {}) {
     }
     for (const pane of configuration.querySelectorAll("[data-pane]"))
       pane.hidden = pane.dataset.pane !== tab.dataset.tab;
+    if (tab.dataset.tab === "speech")
+      refreshSpeechConnections();
   }
   for (const [index, tab] of tabs.entries()) {
     const pane = configuration.querySelector(`[data-pane="${tab.dataset.tab}"]`);
@@ -845,7 +849,7 @@ function mountView(ctx, root, options = {}) {
     updateControls();
   }
   function initializeCharacterVoice() {
-    if (!initializeVoice || surface !== "settings" || !selectedCharacter() || !speechConnections.length)
+    if (!initializeVoice || surface !== "settings" || isBusy() || !selectedCharacter() || !speechConnections.length)
       return;
     initializeVoice = false;
     applyCharacterVoice(true);
@@ -861,6 +865,72 @@ function mountView(ctx, root, options = {}) {
       option.disabled = !provider || !provider.available && !(provider.id === "connection" && provider.unavailableReason === "connectionRequired");
       option.textContent = `${provider?.name ?? (option.value === "whistle" ? "Whistle (on this device)" : option.value === "webspeech" ? "Web Speech" : "STT connection")}${option.disabled ? " · unavailable" : ""}`;
     }
+  }
+  function refreshSpeechConnections(force = false) {
+    if (disposed || disposing || speechDiscovery && !force)
+      return;
+    if (speechDiscovery) {
+      speechDiscovery.controller.abort();
+      window.clearTimeout(speechDiscovery.timer);
+    }
+    const controller = new AbortController;
+    let ttsPending = true, sttPending = true;
+    const timer = window.setTimeout(() => {
+      if (speechDiscovery?.controller !== controller)
+        return;
+      controller.abort();
+      speechDiscovery = null;
+      if (ttsPending)
+        speechConnectionsFailed = true;
+      if (sttPending)
+        transcriptionConnectionsFailed = true;
+      updateControls();
+    }, 15000);
+    speechDiscovery = { controller, timer };
+    const current = () => !disposed && !controller.signal.aborted && speechDiscovery?.controller === controller;
+    const speechListing = listSpeechConnections(ctx, controller.signal).then((connections) => {
+      if (!current())
+        return;
+      ttsPending = false;
+      speechConnectionsFailed = false;
+      if (JSON.stringify(connections) !== JSON.stringify(speechConnections)) {
+        speechConnections = connections;
+        fill(tts, connections.map((entry) => ({ id: entry.id, label: `${entry.name} · ${entry.provider}` })), "Choose a TTS connection", settings().ttsId);
+        chooseDefaults();
+        initializeCharacterVoice();
+      }
+      updateControls();
+    }).catch(() => {
+      if (current()) {
+        ttsPending = false;
+        speechConnectionsFailed = true;
+        updateControls();
+      }
+    });
+    const inputListing = listTranscriptionConnections(ctx, controller.signal).then((connections) => {
+      if (!current())
+        return;
+      sttPending = false;
+      transcriptionConnectionsFailed = false;
+      if (JSON.stringify(connections) !== JSON.stringify(transcriptionConnections)) {
+        transcriptionConnections = connections;
+        fill(stt, connections.map((entry) => ({ id: entry.id, label: `${entry.name} · ${entry.provider}` })), "Choose an STT connection", settings().sttId);
+        chooseDefaults();
+      }
+      discoverInputProviders();
+      updateControls();
+    }).catch(() => {
+      if (current()) {
+        sttPending = false;
+        transcriptionConnectionsFailed = true;
+        updateControls();
+      }
+    });
+    Promise.allSettled([speechListing, inputListing]).finally(() => {
+      window.clearTimeout(timer);
+      if (speechDiscovery?.controller === controller)
+        speechDiscovery = null;
+    });
   }
   function updateControls() {
     const busy = isBusy();
@@ -881,8 +951,8 @@ function mountView(ctx, root, options = {}) {
     voiceInput.disabled = busy || !inputAPI;
     element("voice-options").hidden = !voiceInput.checked;
     element("stt-connection").hidden = !connectionInput;
-    element("tts-guidance").textContent = !outputAPI ? "Update Lumiverse to enable spoken replies." : !granted.includes("media") ? "Use Permissions to grant Media for speech playback." : "Voice and playback settings are managed in Voice & Speech.";
-    element("stt-guidance").textContent = inputAPI && !granted.includes("media") ? "Use Permissions to grant Media for voice input." : !providerReady ? provider?.unavailableReason === "hostUpdate" ? "Update Lumiverse to use speech recognition through Spindle." : "Unavailable in this window. Choose another provider or check Voice & Speech." : connectionInput ? "Audio is sent to this connection. Listening ends on silence." : sttProvider.value === "whistle" ? "On-device recognition. Listening ends on silence." : "Uses your browser or device's speech engine. Listening ends on silence.";
+    element("tts-guidance").textContent = !outputAPI ? "Update Lumiverse to enable spoken replies." : !granted.includes("media") ? "Use Permissions to grant Media for speech playback." : speechConnectionsFailed ? "Voice connections could not load. Use Refresh to retry." : "Voice and playback settings are managed in Voice & Speech.";
+    element("stt-guidance").textContent = inputAPI && !granted.includes("media") ? "Use Permissions to grant Media for voice input." : connectionInput && transcriptionConnectionsFailed ? "STT connections could not load. Use Refresh to retry." : !providerReady ? provider?.unavailableReason === "hostUpdate" ? "Update Lumiverse to use speech recognition through Spindle." : "Unavailable in this window. Choose another provider or check Voice & Speech." : connectionInput ? "Audio is sent to this connection. Listening ends on silence." : sttProvider.value === "whistle" ? "On-device recognition. Listening ends on silence." : "Uses your browser or device's speech engine. Listening ends on silence.";
     duration.disabled = busy || !video;
     element("duration-field").hidden = !video;
     const needsSettings = !hasGrants || !supported || !character.value || !current.characterId || !current.connectionId || !current.deviceId || character.value !== current.characterId || connection.value !== current.connectionId || device.value !== current.deviceId || question.value.length > MAX_QUESTION || video && !validDuration || autoSpeak.checked && !validVoice;
@@ -1146,6 +1216,7 @@ function mountView(ctx, root, options = {}) {
           window.clearTimeout(devicesTimeout);
       }
       const oldCharacter = snapshot?.settings.characterId;
+      const oldVoice = snapshot?.settings.ttsId, oldTranscription = snapshot?.settings.sttId;
       snapshot = incoming;
       mountShortcuts();
       applySettings();
@@ -1175,6 +1246,8 @@ function mountView(ctx, root, options = {}) {
         refresh(0);
       if (catalog && incoming.settings.deviceId && !catalog.devices.some((entry) => entry.id === incoming.settings.deviceId))
         discoverDevices();
+      if (oldVoice !== incoming.settings.ttsId && incoming.settings.ttsId && !speechConnections.some((entry) => entry.id === incoming.settings.ttsId) || oldTranscription !== incoming.settings.sttId && incoming.settings.sttId && !transcriptionConnections.some((entry) => entry.id === incoming.settings.sttId))
+        refreshSpeechConnections();
       flushSettings();
       updateControls();
       return;
@@ -1422,6 +1495,7 @@ function mountView(ctx, root, options = {}) {
     retainSettingsEdits();
     subscribe();
     refresh();
+    refreshSpeechConnections(true);
   });
   listen(element("check-devices"), "click", () => {
     if (catalog)
@@ -1463,6 +1537,7 @@ function mountView(ctx, root, options = {}) {
       if (!disposed) {
         granted = permissions;
         refresh();
+        refreshSpeechConnections(true);
         updateControls();
       }
     }).catch(() => {
@@ -1497,6 +1572,7 @@ function mountView(ctx, root, options = {}) {
       if (!disposed) {
         granted = permissions;
         refresh();
+        refreshSpeechConnections(true);
         updateControls();
       }
     }).catch(() => {});
@@ -1511,32 +1587,8 @@ function mountView(ctx, root, options = {}) {
     if (!disposed)
       notice("Cannot read grants. Check the extension's permissions.", true);
   });
-  const listingTimeout = window.setTimeout(() => listingController.abort(), 15000);
-  const speechListing = listSpeechConnections(ctx, listingController.signal).then((connections) => {
-    if (disposed)
-      return;
-    speechConnections = connections;
-    fill(tts, connections.map((entry) => ({ id: entry.id, label: `${entry.name} · ${entry.provider}` })), "Choose a TTS connection", settings().ttsId);
-    chooseDefaults();
-    initializeCharacterVoice();
-    updateControls();
-  }).catch(() => {
-    if (!disposed)
-      element("speech-status").textContent = "Voice connections could not be loaded. Reopen settings to retry.";
-  });
   discoverInputProviders();
-  const inputListing = listTranscriptionConnections(ctx, listingController.signal).then((connections) => {
-    if (disposed)
-      return;
-    transcriptionConnections = connections;
-    fill(stt, connections.map((entry) => ({ id: entry.id, label: `${entry.name} · ${entry.provider}` })), "Choose an STT connection", settings().sttId);
-    chooseDefaults();
-    updateControls();
-  }).catch(() => {
-    if (!disposed)
-      element("input-status").textContent = "STT connections could not be loaded. Choose Whistle or reopen settings to retry.";
-  });
-  Promise.allSettled([speechListing, inputListing]).finally(() => window.clearTimeout(listingTimeout));
+  refreshSpeechConnections();
   const resynchronize = () => {
     if (disposed || disposing)
       return;
@@ -1559,6 +1611,7 @@ function mountView(ctx, root, options = {}) {
     approvalCheckedKey = "";
     subscribe();
     refresh();
+    refreshSpeechConnections(true);
     updateControls();
   };
   cleanups.push(ctx.events.on("CONNECTED", (payload) => {
@@ -1577,6 +1630,7 @@ function mountView(ctx, root, options = {}) {
       discoverDevices();
     else
       refresh();
+    refreshSpeechConnections();
     updateControls();
   };
   window.addEventListener("pageshow", restorePage);
@@ -1595,7 +1649,11 @@ function mountView(ctx, root, options = {}) {
     cancel(false);
     send({ type: "unsubscribe" });
     disposed = true;
-    listingController.abort();
+    if (speechDiscovery) {
+      speechDiscovery.controller.abort();
+      window.clearTimeout(speechDiscovery.timer);
+      speechDiscovery = null;
+    }
     stopSpeech();
     pendingBegin?.reject(new Error("Companion window closed."));
     pendingBegin = null;
@@ -1615,7 +1673,6 @@ function mountView(ctx, root, options = {}) {
     resetCharacterRequest();
     if (approvalQuery)
       window.clearTimeout(approvalQuery.timer);
-    window.clearTimeout(listingTimeout);
     for (const cleanup of shortcutCleanups.splice(0))
       cleanup();
     for (const cleanup of cleanups.splice(0))

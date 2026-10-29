@@ -6,6 +6,7 @@ import { installCompanion } from "../src/worker";
 import { CHARACTER, deferred, fixture, settle } from "./fixtures";
 
 async function widget(options: { stt?: Promise<Response>; silence?: Promise<void>; tts?: Promise<Response>; autoplayBlocked?: boolean; microphoneDenied?: boolean; offline?: boolean; approval?: boolean; desktop?: boolean; oldHost?: boolean;
+  listSpeech?: (kind: string, sessionId: string) => Promise<any[]>;
   dropInitialSubscription?: boolean; characterLibrary?: boolean; legacyPicker?: boolean; sharedControls?: boolean; hostStt?: boolean; hostSpeech?: boolean; noConnections?: boolean; noMedia?: boolean; providers?: SpindleSTTProviderOption[] } = {}) {
   const host = fixture();
   const library = Array.from({ length: 125 }, (_, i) => ({ ...CHARACTER, id: i === 0 ? CHARACTER.id : `character-${i}`,
@@ -98,6 +99,7 @@ async function widget(options: { stt?: Promise<Response>; silence?: Promise<void
       },
     } } : {}),
     connections: { async list({ kind }: { kind: string }) {
+      if (options.listSpeech) return options.listSpeech(kind, sessionId);
       if (kind === "stt" && options.noConnections) throw new Error("No connections available");
       return kind === "tts" ? [{ id: "voice-a", kind, name: "Mira's voice", provider: "google", voice: "warm" }]
         : [{ id: "stt-a", kind, name: "Dictation", provider: "openai" }];
@@ -172,6 +174,7 @@ async function widget(options: { stt?: Promise<Response>; silence?: Promise<void
     debounceSettings: synchronize,
     settingsTimers: () => [...timers].filter(([, timer]) => timer.delay === 300).map(([id]) => id),
     expireDiscovery: () => runTimers(8000),
+    expireSpeechDiscovery: () => runTimers(15000),
     search: (query: string) => { components.find(c => c.options.ariaLabel === "Character")!.options.onSearchChange(query); return runTimers(200); },
     expireApproval: () => runTimers(12000),
     expireInput: () => runTimers(60000),
@@ -190,6 +193,85 @@ async function widget(options: { stt?: Promise<Response>; silence?: Promise<void
 }
 
 describe("configured widget share pipeline", () => {
+  test("speech lists recover from an initially empty host cache on focus without polling", async () => {
+    let ready = false;
+    const screen = await widget({ listSpeech: async kind => ready ? [{ id: `${kind}-ready`, kind, name: `${kind} ready`, provider: "google" }] : [] });
+    try {
+      expect(screen.element<HTMLSelectElement>("tts").options).toHaveLength(1);
+      expect(screen.element<HTMLSelectElement>("stt").options).toHaveLength(1);
+      ready = true; await screen.discover(); await screen.synchronize();
+      expect(screen.element<HTMLSelectElement>("tts").value).toBe("tts-ready");
+      expect(screen.element<HTMLSelectElement>("stt").value).toBe("stt-ready");
+      expect(screen.components.find(c => c.options.ariaLabel === "TTS connection")!.options.options).toEqual([
+        { value: "tts-ready", label: "tts ready · google", disabled: false },
+      ]);
+      expect(screen.host.requests).toHaveLength(0); expect(screen.requests).toHaveLength(0);
+    } finally { await screen.close(); }
+  });
+
+  test("Refresh retries failed speech discovery and reconnect updates renamed profiles", async () => {
+    let ready = false;
+    let name = "Original";
+    const screen = await widget({ listSpeech: async kind => {
+      if (!ready) throw new Error("PRIVATE_BACKEND_FAILURE");
+      return [{ id: `${kind}-ready`, kind, name, provider: "google" }];
+    } });
+    try {
+      ready = true; screen.element<HTMLButtonElement>("refresh").click(); await settle(); await screen.synchronize();
+      expect(screen.element<HTMLSelectElement>("tts").value).toBe("tts-ready");
+      expect(screen.element<HTMLSelectElement>("stt").value).toBe("stt-ready");
+      const saves = screen.outgoing.filter(message => message.type === "configure").length;
+      name = "Renamed"; await screen.connected();
+      expect(screen.element<HTMLSelectElement>("tts").selectedOptions[0].textContent).toBe("Renamed · google");
+      expect(screen.element<HTMLSelectElement>("stt").selectedOptions[0].textContent).toBe("Renamed · google");
+      expect(screen.outgoing.filter(message => message.type === "configure")).toHaveLength(saves);
+      expect(screen.settings.panel.textContent).not.toContain("PRIVATE_BACKEND_FAILURE");
+      expect(screen.host.requests).toHaveLength(0); expect(screen.recognitions).toHaveLength(0);
+    } finally { await screen.close(); }
+  });
+
+  test("speech discovery timeout can be retried and a late response cannot replace newer choices", async () => {
+    const pending = deferred<any[]>();
+    let ready = false;
+    const screen = await widget({ listSpeech: async kind => ready ? [{ id: `${kind}-new`, kind, name: "Current", provider: "google" }] : pending.promise });
+    try {
+      await screen.expireSpeechDiscovery();
+      ready = true; screen.element<HTMLButtonElement>("refresh").click(); await settle(); await screen.synchronize();
+      expect(screen.element<HTMLSelectElement>("tts").value).toBe("tts-new");
+      expect(screen.element<HTMLSelectElement>("stt").value).toBe("stt-new");
+      pending.resolve([{ id: "obsolete", kind: "tts", name: "Obsolete", provider: "google" }]); await settle();
+      expect(screen.element<HTMLSelectElement>("tts").value).toBe("tts-new");
+      expect(screen.element<HTMLSelectElement>("stt").value).toBe("stt-new");
+    } finally { pending.resolve([]); await screen.close(); }
+  });
+
+  test("new speech selections synchronize to widgets and a failed refresh preserves working choices", async () => {
+    let added = false, failed = false;
+    const loads: string[] = [];
+    const screen = await widget({ listSpeech: async (kind, sessionId) => {
+      loads.push(sessionId);
+      if (failed) throw new Error("Connection unavailable");
+      return ["a", ...(added ? ["b"] : [])].map(suffix => ({ id: `${kind}-${suffix}`, kind, name: suffix, provider: "google" }));
+    } });
+    try {
+      await screen.enable("auto-speak");
+      added = true;
+      screen.settings.panel.querySelector<HTMLButtonElement>('[data-tab="speech"]')!.click(); await settle();
+      screen.components.find(c => c.options.ariaLabel === "TTS connection")!.options.onChange("tts-b");
+      screen.components.find(c => c.options.ariaLabel === "STT connection")!.options.onChange("stt-b");
+      const widgetLoads = loads.filter(sessionId => sessionId === "session-b").length;
+      await screen.synchronize();
+      expect(loads.filter(sessionId => sessionId === "session-b").length).toBeGreaterThan(widgetLoads);
+      expect(screen.element<HTMLButtonElement>("observe").disabled).toBe(false);
+      failed = true; screen.element<HTMLButtonElement>("refresh").click(); await settle();
+      expect(screen.element<HTMLSelectElement>("tts").value).toBe("tts-b");
+      expect(screen.element<HTMLSelectElement>("stt").value).toBe("stt-b");
+      expect(screen.element("tts-guidance").textContent).toContain("Use Refresh to retry");
+      expect(screen.element<HTMLButtonElement>("observe").disabled).toBe(false);
+      expect(screen.host.requests).toHaveLength(0); expect(screen.requests).toHaveLength(0);
+    } finally { await screen.close(); }
+  });
+
   test("idle time never polls connections or redraws shared controls", async () => {
     const screen = await widget();
     try {
