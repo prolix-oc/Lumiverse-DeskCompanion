@@ -23,7 +23,8 @@ type Observe = Extract<ClientMessage, { type: "observe" }>;
 export type ResponseBody = ServerMessage extends infer Message ? Message extends ServerMessage ? Omit<Message, "channel" | "id" | "clientId"> : never : never;
 
 function characterOption(character: CharacterDTO): CharacterOption {
-  return { id: character.id, name: safeLabel(character.name), voice: characterVoice(character.extensions) };
+  return { id: character.id, name: safeLabel(character.name), voice: characterVoice(character.extensions),
+    avatarUrl: (character as CharacterDTO & { avatar_url?: string | null }).avatar_url ?? null };
 }
 
 function errorCode(error: unknown, stage: "checking" | "consent" | "generating"): ErrorCode {
@@ -86,8 +87,8 @@ export function installCompanion(api: SpindleAPI, options: { now?: () => number;
       platform: device.platform, image: device.capabilities.image, video: device.capabilities.video }));
   }
 
-  async function catalog(message: Extract<ClientMessage, { type: "catalog" | "devices" | "approval" }>, route: Route): Promise<void> {
-    const key = JSON.stringify([route.userId, route.frontendSessionId, route.clientId, message.type]);
+  async function catalog(message: Extract<ClientMessage, { type: "catalog" | "characters" | "devices" | "approval" }>, route: Route): Promise<void> {
+    const key = JSON.stringify([route.userId, route.frontendSessionId, route.clientId, message.type, message.type === "characters" ? route.id : ""]);
     if (catalogJobs.has(key) || catalogJobs.size >= 16) { failure(route, "BUSY"); return; }
     catalogJobs.add(key);
     try {
@@ -102,6 +103,13 @@ export function installCompanion(api: SpindleAPI, options: { now?: () => number;
         send(route, { type: "devices", devices: await listDevices(route.userId) });
         return;
       }
+      if (message.type === "characters") {
+        if (message.search && !(api.host.capabilities["character-search-v1"] >= 1)) throw new DeskError("HOST_UNSUPPORTED");
+        const result = await api.characters.list({ limit: CHARACTER_PAGE_SIZE, offset: message.offset, userId: route.userId, ...{ search: message.search || undefined } });
+        send(route, { type: "characters", characters: result.data.map(characterOption), total: result.total,
+          nextOffset: message.offset + result.data.length, search: message.search });
+        return;
+      }
       const [characters, connections, devices] = await Promise.all([
         api.characters.list({ limit: CHARACTER_PAGE_SIZE, offset: message.page * CHARACTER_PAGE_SIZE, userId: route.userId }),
         api.connections.list(route.userId),
@@ -112,7 +120,8 @@ export function installCompanion(api: SpindleAPI, options: { now?: () => number;
         const character = await api.characters.get(message.activeCharacterId, route.userId);
         if (character) choices.unshift(characterOption(character));
       }
-      const result: Catalog = { characters: choices, characterTotal: characters.total, page: message.page,
+      const result: Catalog = { characters: choices, characterTotal: characters.total, characterNextOffset: message.page * CHARACTER_PAGE_SIZE + characters.data.length,
+        characterSearch: api.host.capabilities["character-search-v1"] >= 1, page: message.page,
         connections: connections.slice(0, 200).map((connection) => ({ id: connection.id, name: safeLabel(connection.name),
           provider: connection.provider, model: safeLabel(connection.model), ...mediaSupport(connection.provider, connection.model) })),
         devices };
@@ -229,7 +238,7 @@ export function installCompanion(api: SpindleAPI, options: { now?: () => number;
       }
       return;
     }
-    if (message.type === "catalog" || message.type === "devices" || message.type === "approval") void catalog(message, route);
+    if (message.type === "catalog" || message.type === "characters" || message.type === "devices" || message.type === "approval") void catalog(message, route);
     else if (message.type === "observe") void observe(message, route);
     else void sharedState.handle(message, route).catch((error) => failure(route, error instanceof DeskError ? error.code : "SETTINGS_FAILED"));
   });

@@ -26,8 +26,6 @@ textarea.dc-native { resize:vertical; min-height:92px; }
 .dc-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .dc-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
 .dc-grid:has(> [data-role=duration-field][hidden]) { grid-template-columns:1fr; }
-.dc-page { display:flex; justify-content:space-between; align-items:center; gap:8px; margin:-6px 0 18px; color:var(--lumiverse-text-dim,#9e97ad); font-size:11px; }
-.dc-page .dc-button { font-size:11px; padding:4px 8px; }
 .dc-tabs { display:flex; gap:20px; margin-bottom:24px; border-bottom:1px solid var(--lumiverse-border,#3b3548); }
 .dc-tabs .dc-button { border:0; border-radius:0; border-bottom:2px solid transparent; padding:10px 0; background:transparent; color:var(--lumiverse-text-dim,#9e97ad); font-weight:500; }
 .dc-tabs .dc-button[aria-selected=true] { color:var(--lumiverse-primary,#b59bd6); border-bottom-color:var(--lumiverse-primary,#b59bd6); }

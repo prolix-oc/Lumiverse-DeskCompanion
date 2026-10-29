@@ -1,5 +1,5 @@
 import type { DesktopCaptureApprovalStatus, SpindleFrontendContext, SpindleSTTProviderOption } from "lumiverse-spindle-types";
-import { CHANNEL, CHARACTER_PAGE_SIZE, MAX_QUESTION, REQUIRED_PERMISSIONS, createMessageId, record } from "./protocol";
+import { CHANNEL, MAX_QUESTION, REQUIRED_PERMISSIONS, createMessageId, record } from "./protocol";
 import type { Catalog, CharacterOption, ClientMessage, DeviceOption, ServerMessage, VoiceRef } from "./protocol";
 import { CAPTURE_PENDING } from "./capture-flow";
 import { MAX_SPEECH_CHARS, listSpeechConnections, speakReply, speechAPI } from "./speech";
@@ -28,7 +28,6 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
       </div>
       <div data-pane="companion" role="tabpanel" tabindex="0">
         <div class="dc-field"><span>Character</span><select class="dc-native" data-role="character" aria-label="Character"><option value="">Choose a character</option></select></div>
-        <div class="dc-page"><button data-role="previous" type="button" aria-label="Previous character page">Previous</button><span data-role="page">Character library</span><button data-role="next" type="button" aria-label="Next character page">Next</button></div>
         <div class="dc-field"><span>Model connection</span><select class="dc-native" data-role="connection" aria-label="Model connection"><option value="">Choose a model connection</option></select></div>
         <div class="dc-field"><span>Desktop</span><select class="dc-native" data-role="device" aria-label="Desktop device"><option value="">Choose a desktop</option></select></div>
         <div class="dc-grid"><div class="dc-field"><span>Capture</span><select class="dc-native" data-role="kind" aria-label="Capture type"><option value="image">Screenshot</option><option value="video">Video clip</option></select></div><div class="dc-field" data-role="duration-field" hidden><span>Clip length (seconds)</span><input class="dc-native" data-role="duration" aria-label="Clip duration" type="number" min="1" max="30" step="1" value="3" disabled></div></div>
@@ -144,7 +143,33 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
   const listingController = new AbortController();
   const cleanups: Array<() => void> = [];
   const destroySections = surface === "settings" ? mountSharedSections(ctx, configuration) : () => {};
-  const fields = mountSharedFields(ctx, surface === "settings" ? configuration : document.createElement("div"));
+  const knownCharacters = new Map<string, CharacterOption>();
+  let characterChoices: CharacterOption[] = [];
+  let characterOffset = 0;
+  let characterTotal = 0;
+  let characterSearch = "";
+  let characterRequest: { id: string; offset: number; search: string; timer: number } | null = null;
+  let searchTimer: number | null = null;
+  const paginatedPicker = typeof ctx.components?.mountSelect === "function" && (ctx.host.capabilities["shared-select-pagination-v1"] ?? 0) >= 1;
+  const remoteCharacterSearch = () => paginatedPicker && catalog?.characterSearch === true;
+  const searchCharacters = (query: string) => {
+    query = query.trim().slice(0, 200);
+    if (!remoteCharacterSearch() || query === characterSearch || disposed || isBusy() || !granted.includes("characters")) return;
+    characterSearch = query;
+    if (searchTimer !== null) window.clearTimeout(searchTimer);
+    resetCharacterRequest();
+    characterChoices = []; characterOffset = 0; characterTotal = 0;
+    searchTimer = window.setTimeout(() => { searchTimer = null; loadCharacters(true); }, 200);
+    updateControls();
+  };
+  const loadMoreCharacters = () => loadCharacters();
+  const fields = mountSharedFields(ctx, surface === "settings" ? configuration : document.createElement("div"), control => control !== character ? {} : ({
+    options: characterOptions(), forceSearch: true, searchPlaceholder: "Search characters…",
+    remoteSearch: remoteCharacterSearch(), onSearchChange: searchCharacters,
+    loading: catalogId !== null || characterRequest !== null || searchTimer !== null,
+    hasMore: characterOffset < characterTotal, onLoadMore: loadMoreCharacters, loadMoreOnScroll: true,
+    emptyMessage: "No characters found", loadMoreLabel: "Load more characters",
+  }));
   const sharedBadge = mountSharedBadge(ctx, badge);
   cleanups.push(destroySections, () => fields.destroy(), () => sharedBadge.destroy());
   const tabs = Array.from(configuration.querySelectorAll<HTMLButtonElement>("[role=tab]"));
@@ -163,6 +188,38 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
       event.preventDefault(); activateTab(tabs[next]); tabs[next].focus();
     };
     tab.addEventListener("keydown", navigate); cleanups.push(() => tab.removeEventListener("keydown", navigate));
+  }
+
+  function resetCharacterRequest(): void {
+    if (characterRequest) window.clearTimeout(characterRequest.timer);
+    characterRequest = null;
+  }
+
+  function characterOptions(selectedId = character.value) {
+    const choices = [...characterChoices];
+    const selected = knownCharacters.get(selectedId);
+    if (selected && !choices.some(entry => entry.id === selected.id)) choices.unshift(selected);
+    return choices.map(entry => ({ value: entry.id, label: entry.name,
+      leading: { type: "image" as const, src: entry.avatarUrl ?? "", fallback: { text: entry.name.slice(0, 1) } } }));
+  }
+
+  function syncCharacters(preferred = character.value || settings().characterId): void {
+    const choices = characterOptions(preferred);
+    fill(character, choices.map(entry => ({ id: entry.value, label: entry.label })), "Choose a character", preferred);
+  }
+
+  function loadCharacters(first = false): void {
+    if (disposed || surface !== "settings" || !catalog || catalogId || characterRequest || searchTimer !== null || isBusy()
+      || !granted.includes("characters") || !granted.includes("ui_panels") || !first && characterOffset >= characterTotal) return;
+    const offset = first ? 0 : characterOffset;
+    const id = send({ type: "characters", offset, search: remoteCharacterSearch() ? characterSearch : "" });
+    const timer = window.setTimeout(() => {
+      if (characterRequest?.id !== id) return;
+      characterRequest = null;
+      notice("Characters could not be loaded. Refresh to try again.", true); updateControls();
+    }, 8000);
+    characterRequest = { id, offset, search: characterSearch, timer };
+    updateControls();
   }
 
   function mountShortcuts(): void {
@@ -226,6 +283,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
 
   function applySettings(): void {
     const current = settings();
+    if (knownCharacters.has(current.characterId)) syncCharacters(current.characterId);
     for (const { key, control } of settingsControls) {
       if (key === "autoSpeak" || key === "voiceInput") (control as HTMLInputElement).checked = current[key];
       else {
@@ -276,7 +334,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     else if (!previous && choices.length === 1) select.value = choices[0].id;
   }
 
-  function selectedCharacter(): CharacterOption | undefined { return catalog?.characters.find((entry) => entry.id === character.value); }
+  function selectedCharacter(): CharacterOption | undefined { return knownCharacters.get(character.value); }
 
   function isBusy(): boolean {
     return runId !== null || inputController !== null || Boolean(snapshot && snapshot.activity.stage !== "idle");
@@ -374,8 +432,6 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     element<HTMLButtonElement>("grant").disabled = busy;
     element("check-devices").hidden = surface !== "widget" || busy || Boolean(chosenDevice) || !hasGrants;
     element<HTMLButtonElement>("check-devices").disabled = catalogId !== null || devicesId !== null;
-    element<HTMLButtonElement>("previous").disabled = busy || catalogId !== null || !catalog || catalog.page === 0;
-    element<HTMLButtonElement>("next").disabled = busy || catalogId !== null || !catalog || (catalog.page + 1) * CHARACTER_PAGE_SIZE >= catalog.characterTotal;
     badge.dataset.busy = String(busy);
     badge.textContent = busy ? stage === "listening" ? "Listening" : stage === "transcribing" ? "Transcribing" : stage === "consent" ? "Capturing" : stage === "generating" ? "Thinking" : stage === "cancelling" ? "Cancelling" : "Checking"
       : !snapshot ? "Connecting" : !hasGrants ? "Permissions" : !catalog ? "Loading" : saving || Object.keys(pendingPatch).length ? "Saving" : needsSettings || voiceInput.checked && !validInput ? "Setup needed" : "Ready";
@@ -398,7 +454,6 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
       || nativeStatus?.approval === "paused" || nativeStatus?.approval === "unavailable" || nativeStatus?.source === "permission_required" || nativeStatus?.source === "missing";
     readiness.hidden = busy || !readiness.textContent || surface === "widget" && !needsAttention;
     element("sync-status").textContent = !snapshot ? "Connecting…" : saving || Object.keys(pendingPatch).length ? "Saving…" : "Saved";
-    element("page").parentElement!.hidden = !catalog || catalog.characterTotal <= CHARACTER_PAGE_SIZE;
     fields.sync(); sharedBadge.sync();
     discoverApproval();
   }
@@ -435,14 +490,16 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     }
   }
 
-  function refresh(page = catalog?.page ?? 0): void {
+  function refresh(page = 0): void {
     if (disposed || catalogId || devicesId) return;
     discoverInputProviders();
     if (!REQUIRED_PERMISSIONS.filter((permission) => permission !== "screen_capture").every((permission) => granted.includes(permission))
       || (!granted.includes("screen_capture") && !granted.includes("screen_recording"))) {
       notice("Grant UI Panels, Characters, Generation, and at least one capture permission using Permissions."); return;
     }
-    catalogId = send({ type: "catalog", page, activeCharacterId: character.value || ctx.getActiveChat().characterId || undefined });
+    if (searchTimer !== null) window.clearTimeout(searchTimer);
+    searchTimer = null; resetCharacterRequest();
+    catalogId = send({ type: "catalog", page, activeCharacterId: settings().characterId || character.value || ctx.getActiveChat().characterId || undefined });
     catalogTimeout = window.setTimeout(() => {
       catalogId = null; catalogTimeout = null;
       if (!disposed) { notice("Desktop discovery did not finish. Check your connection, then Refresh in Settings.", true); updateControls(); }
@@ -536,6 +593,8 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
         for (const cleanup of shortcutCleanups.splice(0)) cleanup();
         shortcutsMounted = false;
         if (catalogTimeout !== null) window.clearTimeout(catalogTimeout);
+        if (searchTimer !== null) window.clearTimeout(searchTimer);
+        searchTimer = null; resetCharacterRequest();
         if (devicesTimeout !== null) window.clearTimeout(devicesTimeout);
         if (saveTimer !== null) { window.clearTimeout(saveTimer); saveTimer = null; }
       }
@@ -561,7 +620,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
         if (incoming.activity.requestId === pending.id && incoming.activity.ownerClientId === clientId && stage !== "idle") pending.resolve();
         else pending.reject(new Error("Settings changed. Review the synchronized configuration and try again."));
       }
-      if (first || restarted || oldCharacter !== incoming.settings.characterId && !catalog?.characters.some((entry) => entry.id === incoming.settings.characterId)) refresh(0);
+      if (first || restarted || oldCharacter !== incoming.settings.characterId && !knownCharacters.has(incoming.settings.characterId)) refresh(0);
       if (catalog && incoming.settings.deviceId && !catalog.devices.some((entry) => entry.id === incoming.settings.deviceId)) discoverDevices();
       flushSettings(); updateControls(); return;
     }
@@ -579,19 +638,38 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
       discoverApproval(true);
       updateControls(); return;
     }
+    if (message.id === characterRequest?.id) {
+      const request = characterRequest; resetCharacterRequest();
+      if (message.type === "characters" && message.search === request.search) {
+        for (const entry of message.characters) knownCharacters.set(entry.id, entry);
+        const merged = new Map((request.offset === 0 ? [] : characterChoices).map(entry => [entry.id, entry]));
+        for (const entry of message.characters) merged.set(entry.id, entry);
+        characterChoices = [...merged.values()];
+        characterTotal = message.total;
+        characterOffset = message.nextOffset > request.offset ? message.nextOffset : message.total;
+        syncCharacters();
+      } else if (message.type === "error") notice("Characters could not be loaded. Refresh to try again.", true);
+      updateControls();
+      if (message.type === "characters" && !remoteCharacterSearch()) loadCharacters();
+      return;
+    }
     if (message.id === catalogId) {
       if (catalogTimeout !== null) { window.clearTimeout(catalogTimeout); catalogTimeout = null; }
       if (message.type === "catalog") {
         catalog = message.catalog; catalogId = null;
+        for (const entry of catalog.characters) knownCharacters.set(entry.id, entry);
+        characterChoices = catalog.characters;
+        characterOffset = catalog.characterNextOffset; characterTotal = catalog.characterTotal;
         const current = settings();
         const preferred = current.characterId || ctx.getActiveChat().characterId || undefined;
         fill(character, catalog.characters.map((entry) => ({ id: entry.id, label: entry.name })), "Choose a character", preferred);
         fill(connection, catalog.connections.map((entry) => ({ id: entry.id, label: `${entry.name} · ${entry.model}` })), "Choose a model connection", current.connectionId);
         updateDevices(catalog.devices);
-        element("page").textContent = `Page ${catalog.page + 1} · ${catalog.characterTotal} characters`;
         if (!snapshot?.activity.requestId && !isBusy()) notice("");
         chooseDefaults();
         initializeCharacterVoice();
+        if (characterSearch && remoteCharacterSearch()) { characterChoices = []; characterOffset = 0; characterTotal = 0; loadCharacters(true); }
+        else if (!remoteCharacterSearch()) loadCharacters();
       } else if (message.type === "error") { catalogId = null; notice(message.message, true); }
       updateControls(); return;
     }
@@ -702,8 +780,6 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     for (const cleanup of shortcutCleanups.splice(0)) cleanup();
     shortcutsMounted = false; mountShortcuts();
   });
-  listen(element("previous"), "click", () => refresh(Math.max(0, (catalog?.page ?? 0) - 1)));
-  listen(element("next"), "click", () => refresh((catalog?.page ?? 0) + 1));
   listen(element("speak"), "click", () => { void speak(); });
   listen(element("stop-speech"), "click", () => { automaticSpeech.cancel(); stopSpeech(); send({ type: "stop-speech" }); element("speech-status").textContent = "Speech stopped; pending automatic speech is disabled for this share."; });
   listen(element("settings"), "click", () => { options.openSettings ? options.openSettings() : send({ type: "open-settings" }); });
@@ -723,7 +799,12 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     if (!record(payload) || payload.extensionId !== ctx.host.extensionInstallationId) return;
     if (approvalQuery) window.clearTimeout(approvalQuery.timer);
     approvalQuery = null; approval = null; approvalCheckedKey = "";
-    if (payload.granted === false) { cancel(); clearReply(); }
+    if (payload.granted === false) {
+      if (searchTimer !== null) window.clearTimeout(searchTimer);
+      searchTimer = null; resetCharacterRequest();
+      catalogId = null; catalog = null; knownCharacters.clear(); characterChoices = []; characterTotal = 0; characterOffset = 0;
+      fill(character, [], "Choose a character"); cancel(); clearReply();
+    }
     void ctx.permissions.getGranted().then((permissions) => { if (!disposed) { granted = permissions; refresh(); updateControls(); } }).catch(() => {});
   }));
   void ctx.permissions.getGranted().then((permissions) => { if (!disposed) { granted = permissions; send({ type: "subscribe", surface }); updateControls(); } })
@@ -771,6 +852,8 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     if (saveTimer !== null) window.clearTimeout(saveTimer);
     if (devicesTimeout !== null) window.clearTimeout(devicesTimeout);
     if (catalogTimeout !== null) window.clearTimeout(catalogTimeout);
+    if (searchTimer !== null) window.clearTimeout(searchTimer);
+    resetCharacterRequest();
     if (approvalQuery) window.clearTimeout(approvalQuery.timer);
     window.clearTimeout(listingTimeout);
     for (const cleanup of shortcutCleanups.splice(0)) cleanup();

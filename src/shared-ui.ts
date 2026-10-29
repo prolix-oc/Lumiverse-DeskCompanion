@@ -1,4 +1,11 @@
-import type { SpindleFrontendContext, SpindleMountedComponent } from "lumiverse-spindle-types";
+import type { SpindleFrontendContext, SpindleMountedComponent, SpindleSelectOptions } from "lumiverse-spindle-types";
+
+// Additive Spindle 0.6.71 fields, usable before the SDK is published.
+export interface PaginatedSelectOptions extends SpindleSelectOptions {
+  forceSearch?: boolean; remoteSearch?: boolean; onSearchChange?: (query: string) => void;
+  loading?: boolean; hasMore?: boolean; onLoadMore?: () => void; loadMoreOnScroll?: boolean;
+  loadingMessage?: string; loadMoreLabel?: string;
+}
 
 interface FieldBinding { sync(force?: boolean): void; destroy(): void }
 
@@ -13,7 +20,7 @@ function bindField<Options extends object>(state: () => Options, mount: (options
 }
 
 /** Keep the form's values and events while the host owns the visible controls. */
-export function mountSharedFields(ctx: SpindleFrontendContext, root: HTMLElement): { sync(): void; destroy(): void } {
+export function mountSharedFields(ctx: SpindleFrontendContext, root: HTMLElement, selectOptions?: (control: HTMLSelectElement) => Partial<PaginatedSelectOptions>): { sync(): void; destroy(): void } {
   const bindings: FieldBinding[] = [];
   const components = ctx.components;
   for (const control of root.querySelectorAll<HTMLSelectElement | HTMLInputElement | HTMLTextAreaElement>("select,input,textarea")) {
@@ -40,7 +47,7 @@ export function mountSharedFields(ctx: SpindleFrontendContext, root: HTMLElement
         const select = control as HTMLSelectElement;
         const state = () => ({ value: select.value, disabled: select.disabled,
           placeholder: select.options[0]?.value === "" ? select.options[0].textContent ?? "Choose…" : "Choose…",
-          options: Array.from(select.options).filter((option) => option.value).map((option) => ({ value: option.value, label: option.textContent ?? option.value, disabled: option.disabled })) });
+          options: Array.from(select.options).filter((option) => option.value).map((option) => ({ value: option.value, label: option.textContent ?? option.value, disabled: option.disabled })), ...selectOptions?.(select) });
         binding = bindField(state, options => components.mountSelect(target, { ...options, ariaLabel, onChange: emit }));
       } else if (control.tagName === "TEXTAREA" && components?.mountTextArea) {
         binding = bindField(() => ({ value: control.value, disabled: control.disabled }),

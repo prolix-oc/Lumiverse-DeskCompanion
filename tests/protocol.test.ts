@@ -26,6 +26,12 @@ describe("request and character boundaries", () => {
   test("does not accept negative or excessive character pages", () => {
     for (const page of [-1, 10001, "0", 0.5]) expect(parseClientMessage({ ...input, type: "catalog", page })).toBeNull();
   });
+  test("bounds character search and pagination requests", () => {
+    const base = { channel: CHANNEL, id: "request", clientId: "client", type: "characters", offset: 50, search: "  Mira  " };
+    expect(parseClientMessage(base)).toMatchObject({ offset: 50, search: "Mira" });
+    for (const offset of [-1, 0.5, 500001, Infinity]) expect(parseClientMessage({ ...base, offset })).toBeNull();
+    expect(parseClientMessage({ ...base, search: "x".repeat(201) })).toBeNull();
+  });
   test("Vertex partners do not inherit Gemini video support", () => {
     expect(mediaSupport("google_vertex", "publishers/google/models/gemini-2.5-flash").video).toBe(true);
     expect(mediaSupport("google_vertex", "claude-sonnet-4-6").video).toBe(false);

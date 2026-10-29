@@ -23,6 +23,7 @@ export interface CharacterOption {
   id: string;
   name: string;
   voice: VoiceRef | null;
+  avatarUrl?: string | null;
 }
 
 export interface ConnectionOption {
@@ -46,6 +47,8 @@ export interface DeviceOption {
 export interface Catalog {
   characters: CharacterOption[];
   characterTotal: number;
+  characterNextOffset: number;
+  characterSearch: boolean;
   page: number;
   connections: ConnectionOption[];
   devices: DeviceOption[];
@@ -67,6 +70,7 @@ export type ClientMessage = Envelope & (
   | { type: "cancel-shared"; targetId: string }
   | { type: "speech-stage"; targetId: string; stage: "idle" | "synthesizing" | "ready" | "playing" }
   | { type: "catalog"; page: number; activeCharacterId?: string }
+  | { type: "characters"; offset: number; search: string }
   | { type: "devices" }
   | { type: "approval"; deviceId: string; connectionId: string; kind: "image" | "video" }
   | { type: "observe"; characterId: string; connectionId: string; deviceId: string; question: string; kind: "image" | "video"; durationSeconds: number }
@@ -78,6 +82,7 @@ export type ServerMessage = Envelope & (
   | { type: "stop-local"; targetId: string; speechOnly: boolean }
   | { type: "open-settings" }
   | { type: "catalog"; catalog: Catalog }
+  | { type: "characters"; characters: CharacterOption[]; total: number; nextOffset: number; search: string }
   | { type: "devices"; devices: DeviceOption[] }
   | { type: "approval"; status: DesktopCaptureApprovalStatus }
   | { type: "shortcut"; skipVoice: boolean }
@@ -163,6 +168,10 @@ export function parseClientMessage(value: unknown): ClientMessage | null {
     return { ...envelope, type: "input-ended", targetId: value.targetId, message: value.message };
   }
   if (value.type === "cancel" && identifier(value.targetId)) return { ...envelope, type: "cancel", targetId: value.targetId };
+  if (value.type === "characters" && Number.isSafeInteger(value.offset) && Number(value.offset) >= 0 && Number(value.offset) <= 500000
+    && typeof value.search === "string" && value.search.length <= 200) {
+    return { ...envelope, type: "characters", offset: Number(value.offset), search: value.search.trim() };
+  }
   if (value.type === "catalog" && Number.isInteger(value.page) && Number(value.page) >= 0 && Number(value.page) <= 10000
     && (value.activeCharacterId === undefined || identifier(value.activeCharacterId))) {
     return { ...envelope, type: "catalog", page: Number(value.page), activeCharacterId: value.activeCharacterId as string | undefined };

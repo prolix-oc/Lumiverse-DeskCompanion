@@ -183,6 +183,9 @@ function parseClientMessage(value) {
   }
   if (value.type === "cancel" && identifier(value.targetId))
     return { ...envelope, type: "cancel", targetId: value.targetId };
+  if (value.type === "characters" && Number.isSafeInteger(value.offset) && Number(value.offset) >= 0 && Number(value.offset) <= 500000 && typeof value.search === "string" && value.search.length <= 200) {
+    return { ...envelope, type: "characters", offset: Number(value.offset), search: value.search.trim() };
+  }
   if (value.type === "catalog" && Number.isInteger(value.page) && Number(value.page) >= 0 && Number(value.page) <= 1e4 && (value.activeCharacterId === undefined || identifier(value.activeCharacterId))) {
     return { ...envelope, type: "catalog", page: Number(value.page), activeCharacterId: value.activeCharacterId };
   }
@@ -562,7 +565,12 @@ var CAPTURE_COMMANDS = [
 
 // src/worker.ts
 function characterOption(character) {
-  return { id: character.id, name: safeLabel(character.name), voice: characterVoice(character.extensions) };
+  return {
+    id: character.id,
+    name: safeLabel(character.name),
+    voice: characterVoice(character.extensions),
+    avatarUrl: character.avatar_url ?? null
+  };
 }
 function errorCode(error, stage) {
   if (error instanceof DeskError)
@@ -637,7 +645,7 @@ function installCompanion(api, options = {}) {
     }));
   }
   async function catalog(message, route) {
-    const key = JSON.stringify([route.userId, route.frontendSessionId, route.clientId, message.type]);
+    const key = JSON.stringify([route.userId, route.frontendSessionId, route.clientId, message.type, message.type === "characters" ? route.id : ""]);
     if (catalogJobs.has(key) || catalogJobs.size >= 16) {
       failure(route, "BUSY");
       return;
@@ -655,6 +663,19 @@ function installCompanion(api, options = {}) {
         send(route, { type: "devices", devices: await listDevices(route.userId) });
         return;
       }
+      if (message.type === "characters") {
+        if (message.search && !(api.host.capabilities["character-search-v1"] >= 1))
+          throw new DeskError("HOST_UNSUPPORTED");
+        const result = await api.characters.list({ limit: CHARACTER_PAGE_SIZE, offset: message.offset, userId: route.userId, ...{ search: message.search || undefined } });
+        send(route, {
+          type: "characters",
+          characters: result.data.map(characterOption),
+          total: result.total,
+          nextOffset: message.offset + result.data.length,
+          search: message.search
+        });
+        return;
+      }
       const [characters, connections, devices] = await Promise.all([
         api.characters.list({ limit: CHARACTER_PAGE_SIZE, offset: message.page * CHARACTER_PAGE_SIZE, userId: route.userId }),
         api.connections.list(route.userId),
@@ -669,6 +690,8 @@ function installCompanion(api, options = {}) {
       const result = {
         characters: choices,
         characterTotal: characters.total,
+        characterNextOffset: message.page * CHARACTER_PAGE_SIZE + characters.data.length,
+        characterSearch: api.host.capabilities["character-search-v1"] >= 1,
         page: message.page,
         connections: connections.slice(0, 200).map((connection) => ({
           id: connection.id,
@@ -848,7 +871,7 @@ function installCompanion(api, options = {}) {
       }
       return;
     }
-    if (message.type === "catalog" || message.type === "devices" || message.type === "approval")
+    if (message.type === "catalog" || message.type === "characters" || message.type === "devices" || message.type === "approval")
       catalog(message, route);
     else if (message.type === "observe")
       observe(message, route);

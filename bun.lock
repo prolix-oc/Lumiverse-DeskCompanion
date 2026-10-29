@@ -6,7 +6,7 @@
       "name": "lumiverse-desk-companion",
       "devDependencies": {
         "jsdom": "29.0.1",
-        "lumiverse-spindle-types": "0.6.69",
+        "lumiverse-spindle-types": "0.6.71",
         "typescript": "5.6.3",
       },
     },
@@ -54,7 +54,7 @@
 
     "lru-cache": ["lru-cache@11.5.3", "", {}, "sha512-U4N8FgzmWxc8k1VH8Kr6lQg18U7Fjvby6wXHVRX/ZZ7IwWbRMgrRbP0Wrb5q5NVinryp4SQampHKdvtecItxUg=="],
 
-    "lumiverse-spindle-types": ["lumiverse-spindle-types@0.6.69", "", {}, "sha512-LdG17tYo1+YhOTMQzMyPg2m7gO6pSItT4fRbf2vKvMfiRJdxk+zh5q+e3ewMz4XUd8mSXpfZ7iI6qtMjxm291w=="],
+    "lumiverse-spindle-types": ["lumiverse-spindle-types@0.6.71", "", {}, "sha512-P5u/0dYDhzT5B8VVJzUOuk9AVwKNcQfqKcHawio32cnCH/4/UErS/YEu2Lsj8TqX2NRumiHkF0gYeoHvT3wwpQ=="],
 
     "mdn-data": ["mdn-data@2.27.1", "", {}, "sha512-9Yubnt3e8A0OKwxYSXyhLymGW4sCufcLG6VdiDdUGVkPhpqLxlvP5vl1983gQjJl3tqbrM731mjaZaP68AgosQ=="],
 

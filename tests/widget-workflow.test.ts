@@ -3,11 +3,23 @@ import { JSDOM } from "jsdom";
 import type { SpindleFrontendContext, SpindleSTTProviderOption, SpindleSTTStartOptions } from "lumiverse-spindle-types";
 import { mountView } from "../src/companion-view";
 import { installCompanion } from "../src/worker";
-import { deferred, fixture, settle } from "./fixtures";
+import { CHARACTER, deferred, fixture, settle } from "./fixtures";
 
 async function widget(options: { stt?: Promise<Response>; silence?: Promise<void>; tts?: Promise<Response>; autoplayBlocked?: boolean; microphoneDenied?: boolean; offline?: boolean; approval?: boolean; desktop?: boolean; oldHost?: boolean;
-  sharedControls?: boolean; hostStt?: boolean; hostSpeech?: boolean; noConnections?: boolean; noMedia?: boolean; providers?: SpindleSTTProviderOption[] } = {}) {
+  characterLibrary?: boolean; legacyPicker?: boolean; sharedControls?: boolean; hostStt?: boolean; hostSpeech?: boolean; noConnections?: boolean; noMedia?: boolean; providers?: SpindleSTTProviderOption[] } = {}) {
   const host = fixture();
+  const library = Array.from({ length: 125 }, (_, i) => ({ ...CHARACTER, id: i === 0 ? CHARACTER.id : `character-${i}`,
+    name: i === 0 ? CHARACTER.name : i === 120 ? "Zelda" : `Companion ${i}`,
+    avatar_url: `https://lumiverse.test/thumbnail-${i}.png` }));
+  if (options.characterLibrary) {
+    Object.assign(host.mutable.host.capabilities, { "character-search-v1": 1 });
+    host.mutable.characters.list = async (input: any) => {
+      const choices = library.filter(c => !input.search || c.name.toLowerCase().includes(input.search.toLowerCase()));
+      return { data: choices.slice(input.offset, input.offset + input.limit), total: choices.length };
+    };
+    host.mutable.characters.get = async (id: string) => library.find(c => c.id === id) ?? null as any;
+  }
+
   if (options.approval) Object.assign(host.mutable.host.capabilities, { "desktop-capture-approval-status-v1": 1 });
   if (options.oldHost) host.mutable.host.capabilities["command-session-routing-v1"] = 0;
   const editors: Array<{ target: HTMLElement; commandId: string; destroyed: boolean }> = [];
@@ -55,7 +67,7 @@ async function widget(options: { stt?: Promise<Response>; silence?: Promise<void
   };
   const uninstall = installCompanion(host.api, { now: () => clock });
   function context(sessionId: string): SpindleFrontendContext { return { manifest: { identifier: "desk_companion" },
-    host: { ...host.mutable.host, capabilities: { "frontend-session-origin-v1": 1, ...(options.hostStt !== false ? { "speech-to-text-v1": 1 } : {}), ...(options.hostSpeech !== false ? { "text-to-speech-v1": 1, "connection-kinds-v1": 1 } : {}) } }, frontendSessionId: sessionId,
+    host: { ...host.mutable.host, capabilities: { "frontend-session-origin-v1": 1, ...(options.characterLibrary && !options.legacyPicker ? { "shared-select-pagination-v1": 1 } : {}), ...(options.hostStt !== false ? { "speech-to-text-v1": 1 } : {}), ...(options.hostSpeech !== false ? { "text-to-speech-v1": 1, "connection-kinds-v1": 1 } : {}) } }, frontendSessionId: sessionId,
     ...(options.hostStt !== false ? { stt: {
       listProviders: () => options.providers ?? [
         { id: "whistle", name: "Whistle (on this device)", onDevice: true, available: true, supportsAudioTranscription: true },
@@ -145,6 +157,7 @@ async function widget(options: { stt?: Promise<Response>; silence?: Promise<void
     advanceClock: () => { clock += 10001; },
     discover: () => runTimers(10000),
     expireDiscovery: () => runTimers(8000),
+    search: (query: string) => { components.find(c => c.options.ariaLabel === "Character")!.options.onSearchChange(query); return runTimers(200); },
     expireApproval: () => runTimers(12000),
     expireInput: () => runTimers(60000),
     microphoneRequests: () => microphoneRequests, tracksStopped: () => tracksStopped, playback: () => playback,
@@ -162,6 +175,74 @@ async function widget(options: { stt?: Promise<Response>; silence?: Promise<void
 }
 
 describe("configured widget share pipeline", () => {
+  test("character picker loads on scroll, searches the library and retains selection and thumbnails", async () => {
+    const screen = await widget({ characterLibrary: true });
+    try {
+      const picker = screen.components.find(c => c.options.ariaLabel === "Character")!;
+      expect(screen.settings.panel.querySelector('[data-role="next"]')).toBeNull();
+      expect(picker.options.loadMoreOnScroll).toBe(true);
+      expect(picker.options.remoteSearch).toBe(true);
+      expect(picker.options.options).toHaveLength(50);
+      expect(picker.options.options[0].leading.src).toBe("https://lumiverse.test/thumbnail-0.png");
+      const settingsClient = screen.outgoing.find(message => message.type === "subscribe" && message.surface === "settings").clientId;
+      const catalogs = screen.outgoing.filter(message => message.type === "catalog" && message.clientId === settingsClient).length;
+      picker.options.onLoadMore(); picker.options.onLoadMore(); await settle();
+      expect(picker.options.options).toHaveLength(100);
+      picker.options.onChange("character-75"); await screen.synchronize();
+      await screen.search("Zelda");
+      expect(picker.options.options.map((c: any) => c.value)).toEqual(["character-75", "character-120"]);
+      expect(picker.options.value).toBe("character-75");
+      expect(picker.options.hasMore).toBe(false);
+      picker.options.onChange("character-120"); await screen.synchronize();
+      expect(picker.options.value).toBe("character-120");
+      expect(screen.element<HTMLButtonElement>("observe").disabled).toBe(false);
+      await screen.search("");
+      expect(picker.options.options[0].value).toBe("character-120");
+      expect(screen.outgoing.filter(message => message.type === "catalog" && message.clientId === settingsClient)).toHaveLength(catalogs);
+      expect(screen.requests).toHaveLength(0);
+    } finally { await screen.close(); }
+  });
+
+  test("character search ignores stale pages and failed pagination can be retried", async () => {
+    const screen = await widget({ characterLibrary: true });
+    try {
+      const picker = screen.components.find(c => c.options.ariaLabel === "Character")!;
+      const list = screen.host.mutable.characters.list;
+      screen.host.mutable.characters.list = async () => { throw new Error("private provider data"); };
+      picker.options.onLoadMore(); await settle();
+      expect(picker.options.loading).toBe(false);
+      expect(picker.options.hasMore).toBe(true);
+      expect(picker.options.options).toHaveLength(50);
+      screen.host.mutable.characters.list = list;
+      picker.options.onLoadMore(); await settle();
+      expect(picker.options.options).toHaveLength(100);
+      const late = deferred<any>();
+      screen.host.mutable.characters.list = input => input.search === "older" ? late.promise : list(input);
+      await screen.search("older");
+      await screen.search("Zelda");
+      expect(picker.options.options.map((c: any) => c.label)).toEqual(["Mira", "Zelda"]);
+      late.resolve({ data: [{ ...CHARACTER, id: "stale", name: "Stale" }], total: 1 }); await settle();
+      expect(picker.options.options.map((c: any) => c.label)).toEqual(["Mira", "Zelda"]);
+      expect(picker.options.value).toBe("character-a");
+      expect(screen.settings.panel.textContent).not.toContain("private provider data");
+    } finally { await screen.close(); }
+  });
+
+  test("older pickers preload the library without page controls", async () => {
+    const screen = await widget({ characterLibrary: true, legacyPicker: true });
+    try {
+      const picker = screen.components.find(c => c.options.ariaLabel === "Character")!;
+      expect(picker.options.options).toHaveLength(125);
+      expect(picker.options.remoteSearch).toBe(false);
+      expect(picker.options.hasMore).toBe(false);
+      expect(screen.settings.panel.querySelector('[data-role="previous"]')).toBeNull();
+      picker.options.onChange("character-120"); await screen.synchronize();
+      expect(picker.options.value).toBe("character-120");
+      expect(screen.element<HTMLButtonElement>("observe").disabled).toBe(false);
+      expect(screen.requests).toHaveLength(0);
+    } finally { await screen.close(); }
+  });
+
   test("shared controls save across tabs and windows, follow busy state, and unmount on disposal", async () => {
     const screen = await widget();
     try {

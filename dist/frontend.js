@@ -46,7 +46,6 @@ function parseSettingsPatch(value) {
 // src/protocol.ts
 var CHANNEL = "desk-companion/v1";
 var MAX_QUESTION = 1200;
-var CHARACTER_PAGE_SIZE = 50;
 var REQUIRED_PERMISSIONS = ["ui_panels", "characters", "generation", "screen_capture"];
 function createMessageId() {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
@@ -268,7 +267,7 @@ function bindField(state, mount) {
     destroy: () => handle.destroy()
   };
 }
-function mountSharedFields(ctx, root) {
+function mountSharedFields(ctx, root, selectOptions) {
   const bindings = [];
   const components = ctx.components;
   for (const control of root.querySelectorAll("select,input,textarea")) {
@@ -300,7 +299,8 @@ function mountSharedFields(ctx, root) {
           value: select.value,
           disabled: select.disabled,
           placeholder: select.options[0]?.value === "" ? select.options[0].textContent ?? "Choose…" : "Choose…",
-          options: Array.from(select.options).filter((option) => option.value).map((option) => ({ value: option.value, label: option.textContent ?? option.value, disabled: option.disabled }))
+          options: Array.from(select.options).filter((option) => option.value).map((option) => ({ value: option.value, label: option.textContent ?? option.value, disabled: option.disabled })),
+          ...selectOptions?.(select)
         });
         binding = bindField(state, (options) => components.mountSelect(target, { ...options, ariaLabel, onChange: emit }));
       } else if (control.tagName === "TEXTAREA" && components?.mountTextArea) {
@@ -408,7 +408,6 @@ function mountView(ctx, root, options = {}) {
       </div>
       <div data-pane="companion" role="tabpanel" tabindex="0">
         <div class="dc-field"><span>Character</span><select class="dc-native" data-role="character" aria-label="Character"><option value="">Choose a character</option></select></div>
-        <div class="dc-page"><button data-role="previous" type="button" aria-label="Previous character page">Previous</button><span data-role="page">Character library</span><button data-role="next" type="button" aria-label="Next character page">Next</button></div>
         <div class="dc-field"><span>Model connection</span><select class="dc-native" data-role="connection" aria-label="Model connection"><option value="">Choose a model connection</option></select></div>
         <div class="dc-field"><span>Desktop</span><select class="dc-native" data-role="device" aria-label="Desktop device"><option value="">Choose a desktop</option></select></div>
         <div class="dc-grid"><div class="dc-field"><span>Capture</span><select class="dc-native" data-role="kind" aria-label="Capture type"><option value="image">Screenshot</option><option value="video">Video clip</option></select></div><div class="dc-field" data-role="duration-field" hidden><span>Clip length (seconds)</span><input class="dc-native" data-role="duration" aria-label="Clip duration" type="number" min="1" max="30" step="1" value="3" disabled></div></div>
@@ -530,7 +529,46 @@ function mountView(ctx, root, options = {}) {
   const listingController = new AbortController;
   const cleanups = [];
   const destroySections = surface === "settings" ? mountSharedSections(ctx, configuration) : () => {};
-  const fields = mountSharedFields(ctx, surface === "settings" ? configuration : document.createElement("div"));
+  const knownCharacters = new Map;
+  let characterChoices = [];
+  let characterOffset = 0;
+  let characterTotal = 0;
+  let characterSearch = "";
+  let characterRequest = null;
+  let searchTimer = null;
+  const paginatedPicker = typeof ctx.components?.mountSelect === "function" && (ctx.host.capabilities["shared-select-pagination-v1"] ?? 0) >= 1;
+  const remoteCharacterSearch = () => paginatedPicker && catalog?.characterSearch === true;
+  const searchCharacters = (query) => {
+    query = query.trim().slice(0, 200);
+    if (!remoteCharacterSearch() || query === characterSearch || disposed || isBusy() || !granted.includes("characters"))
+      return;
+    characterSearch = query;
+    if (searchTimer !== null)
+      window.clearTimeout(searchTimer);
+    resetCharacterRequest();
+    characterChoices = [];
+    characterOffset = 0;
+    characterTotal = 0;
+    searchTimer = window.setTimeout(() => {
+      searchTimer = null;
+      loadCharacters(true);
+    }, 200);
+    updateControls();
+  };
+  const loadMoreCharacters = () => loadCharacters();
+  const fields = mountSharedFields(ctx, surface === "settings" ? configuration : document.createElement("div"), (control) => control !== character ? {} : {
+    options: characterOptions(),
+    forceSearch: true,
+    searchPlaceholder: "Search characters…",
+    remoteSearch: remoteCharacterSearch(),
+    onSearchChange: searchCharacters,
+    loading: catalogId !== null || characterRequest !== null || searchTimer !== null,
+    hasMore: characterOffset < characterTotal,
+    onLoadMore: loadMoreCharacters,
+    loadMoreOnScroll: true,
+    emptyMessage: "No characters found",
+    loadMoreLabel: "Load more characters"
+  });
   const sharedBadge = mountSharedBadge(ctx, badge);
   cleanups.push(destroySections, () => fields.destroy(), () => sharedBadge.destroy());
   const tabs = Array.from(configuration.querySelectorAll("[role=tab]"));
@@ -560,6 +598,41 @@ function mountView(ctx, root, options = {}) {
     };
     tab.addEventListener("keydown", navigate);
     cleanups.push(() => tab.removeEventListener("keydown", navigate));
+  }
+  function resetCharacterRequest() {
+    if (characterRequest)
+      window.clearTimeout(characterRequest.timer);
+    characterRequest = null;
+  }
+  function characterOptions(selectedId = character.value) {
+    const choices = [...characterChoices];
+    const selected = knownCharacters.get(selectedId);
+    if (selected && !choices.some((entry) => entry.id === selected.id))
+      choices.unshift(selected);
+    return choices.map((entry) => ({
+      value: entry.id,
+      label: entry.name,
+      leading: { type: "image", src: entry.avatarUrl ?? "", fallback: { text: entry.name.slice(0, 1) } }
+    }));
+  }
+  function syncCharacters(preferred = character.value || settings().characterId) {
+    const choices = characterOptions(preferred);
+    fill(character, choices.map((entry) => ({ id: entry.value, label: entry.label })), "Choose a character", preferred);
+  }
+  function loadCharacters(first = false) {
+    if (disposed || surface !== "settings" || !catalog || catalogId || characterRequest || searchTimer !== null || isBusy() || !granted.includes("characters") || !granted.includes("ui_panels") || !first && characterOffset >= characterTotal)
+      return;
+    const offset = first ? 0 : characterOffset;
+    const id = send({ type: "characters", offset, search: remoteCharacterSearch() ? characterSearch : "" });
+    const timer = window.setTimeout(() => {
+      if (characterRequest?.id !== id)
+        return;
+      characterRequest = null;
+      notice("Characters could not be loaded. Refresh to try again.", true);
+      updateControls();
+    }, 8000);
+    characterRequest = { id, offset, search: characterSearch, timer };
+    updateControls();
   }
   function mountShortcuts() {
     if (surface !== "settings" || shortcutsMounted || !snapshot)
@@ -639,6 +712,8 @@ function mountView(ctx, root, options = {}) {
   ];
   function applySettings() {
     const current = settings();
+    if (knownCharacters.has(current.characterId))
+      syncCharacters(current.characterId);
     for (const { key, control } of settingsControls) {
       if (key === "autoSpeak" || key === "voiceInput")
         control.checked = current[key];
@@ -700,7 +775,7 @@ function mountView(ctx, root, options = {}) {
       select.value = choices[0].id;
   }
   function selectedCharacter() {
-    return catalog?.characters.find((entry) => entry.id === character.value);
+    return knownCharacters.get(character.value);
   }
   function isBusy() {
     return runId !== null || inputController !== null || Boolean(snapshot && snapshot.activity.stage !== "idle");
@@ -793,8 +868,6 @@ function mountView(ctx, root, options = {}) {
     element("grant").disabled = busy;
     element("check-devices").hidden = surface !== "widget" || busy || Boolean(chosenDevice) || !hasGrants;
     element("check-devices").disabled = catalogId !== null || devicesId !== null;
-    element("previous").disabled = busy || catalogId !== null || !catalog || catalog.page === 0;
-    element("next").disabled = busy || catalogId !== null || !catalog || (catalog.page + 1) * CHARACTER_PAGE_SIZE >= catalog.characterTotal;
     badge.dataset.busy = String(busy);
     badge.textContent = busy ? stage === "listening" ? "Listening" : stage === "transcribing" ? "Transcribing" : stage === "consent" ? "Capturing" : stage === "generating" ? "Thinking" : stage === "cancelling" ? "Cancelling" : "Checking" : !snapshot ? "Connecting" : !hasGrants ? "Permissions" : !catalog ? "Loading" : saving || Object.keys(pendingPatch).length ? "Saving" : needsSettings || voiceInput.checked && !validInput ? "Setup needed" : "Ready";
     const nativeStatus = approval?.key === approvalKey() ? approval.status : null;
@@ -803,7 +876,6 @@ function mountView(ctx, root, options = {}) {
     const needsAttention = !hasGrants || !catalog || !chosenDevice || needsSettings || voiceInput.checked && !validInput || nativeStatus?.approval === "paused" || nativeStatus?.approval === "unavailable" || nativeStatus?.source === "permission_required" || nativeStatus?.source === "missing";
     readiness.hidden = busy || !readiness.textContent || surface === "widget" && !needsAttention;
     element("sync-status").textContent = !snapshot ? "Connecting…" : saving || Object.keys(pendingPatch).length ? "Saving…" : "Saved";
-    element("page").parentElement.hidden = !catalog || catalog.characterTotal <= CHARACTER_PAGE_SIZE;
     fields.sync();
     sharedBadge.sync();
     discoverApproval();
@@ -845,7 +917,7 @@ function mountView(ctx, root, options = {}) {
       send({ type: "cancel-shared", targetId });
     }
   }
-  function refresh(page = catalog?.page ?? 0) {
+  function refresh(page = 0) {
     if (disposed || catalogId || devicesId)
       return;
     discoverInputProviders();
@@ -853,7 +925,11 @@ function mountView(ctx, root, options = {}) {
       notice("Grant UI Panels, Characters, Generation, and at least one capture permission using Permissions.");
       return;
     }
-    catalogId = send({ type: "catalog", page, activeCharacterId: character.value || ctx.getActiveChat().characterId || undefined });
+    if (searchTimer !== null)
+      window.clearTimeout(searchTimer);
+    searchTimer = null;
+    resetCharacterRequest();
+    catalogId = send({ type: "catalog", page, activeCharacterId: settings().characterId || character.value || ctx.getActiveChat().characterId || undefined });
     catalogTimeout = window.setTimeout(() => {
       catalogId = null;
       catalogTimeout = null;
@@ -1000,6 +1076,10 @@ function mountView(ctx, root, options = {}) {
         shortcutsMounted = false;
         if (catalogTimeout !== null)
           window.clearTimeout(catalogTimeout);
+        if (searchTimer !== null)
+          window.clearTimeout(searchTimer);
+        searchTimer = null;
+        resetCharacterRequest();
         if (devicesTimeout !== null)
           window.clearTimeout(devicesTimeout);
         if (saveTimer !== null) {
@@ -1033,7 +1113,7 @@ function mountView(ctx, root, options = {}) {
         else
           pending.reject(new Error("Settings changed. Review the synchronized configuration and try again."));
       }
-      if (first || restarted || oldCharacter !== incoming.settings.characterId && !catalog?.characters.some((entry) => entry.id === incoming.settings.characterId))
+      if (first || restarted || oldCharacter !== incoming.settings.characterId && !knownCharacters.has(incoming.settings.characterId))
         refresh(0);
       if (catalog && incoming.settings.deviceId && !catalog.devices.some((entry) => entry.id === incoming.settings.deviceId))
         discoverDevices();
@@ -1069,6 +1149,26 @@ function mountView(ctx, root, options = {}) {
       updateControls();
       return;
     }
+    if (message.id === characterRequest?.id) {
+      const request = characterRequest;
+      resetCharacterRequest();
+      if (message.type === "characters" && message.search === request.search) {
+        for (const entry of message.characters)
+          knownCharacters.set(entry.id, entry);
+        const merged = new Map((request.offset === 0 ? [] : characterChoices).map((entry) => [entry.id, entry]));
+        for (const entry of message.characters)
+          merged.set(entry.id, entry);
+        characterChoices = [...merged.values()];
+        characterTotal = message.total;
+        characterOffset = message.nextOffset > request.offset ? message.nextOffset : message.total;
+        syncCharacters();
+      } else if (message.type === "error")
+        notice("Characters could not be loaded. Refresh to try again.", true);
+      updateControls();
+      if (message.type === "characters" && !remoteCharacterSearch())
+        loadCharacters();
+      return;
+    }
     if (message.id === catalogId) {
       if (catalogTimeout !== null) {
         window.clearTimeout(catalogTimeout);
@@ -1077,16 +1177,27 @@ function mountView(ctx, root, options = {}) {
       if (message.type === "catalog") {
         catalog = message.catalog;
         catalogId = null;
+        for (const entry of catalog.characters)
+          knownCharacters.set(entry.id, entry);
+        characterChoices = catalog.characters;
+        characterOffset = catalog.characterNextOffset;
+        characterTotal = catalog.characterTotal;
         const current = settings();
         const preferred = current.characterId || ctx.getActiveChat().characterId || undefined;
         fill(character, catalog.characters.map((entry) => ({ id: entry.id, label: entry.name })), "Choose a character", preferred);
         fill(connection, catalog.connections.map((entry) => ({ id: entry.id, label: `${entry.name} · ${entry.model}` })), "Choose a model connection", current.connectionId);
         updateDevices(catalog.devices);
-        element("page").textContent = `Page ${catalog.page + 1} · ${catalog.characterTotal} characters`;
         if (!snapshot?.activity.requestId && !isBusy())
           notice("");
         chooseDefaults();
         initializeCharacterVoice();
+        if (characterSearch && remoteCharacterSearch()) {
+          characterChoices = [];
+          characterOffset = 0;
+          characterTotal = 0;
+          loadCharacters(true);
+        } else if (!remoteCharacterSearch())
+          loadCharacters();
       } else if (message.type === "error") {
         catalogId = null;
         notice(message.message, true);
@@ -1259,8 +1370,6 @@ function mountView(ctx, root, options = {}) {
     shortcutsMounted = false;
     mountShortcuts();
   });
-  listen(element("previous"), "click", () => refresh(Math.max(0, (catalog?.page ?? 0) - 1)));
-  listen(element("next"), "click", () => refresh((catalog?.page ?? 0) + 1));
   listen(element("speak"), "click", () => {
     speak();
   });
@@ -1306,6 +1415,17 @@ function mountView(ctx, root, options = {}) {
     approval = null;
     approvalCheckedKey = "";
     if (payload.granted === false) {
+      if (searchTimer !== null)
+        window.clearTimeout(searchTimer);
+      searchTimer = null;
+      resetCharacterRequest();
+      catalogId = null;
+      catalog = null;
+      knownCharacters.clear();
+      characterChoices = [];
+      characterTotal = 0;
+      characterOffset = 0;
+      fill(character, [], "Choose a character");
       cancel();
       clearReply();
     }
@@ -1406,6 +1526,9 @@ function mountView(ctx, root, options = {}) {
       window.clearTimeout(devicesTimeout);
     if (catalogTimeout !== null)
       window.clearTimeout(catalogTimeout);
+    if (searchTimer !== null)
+      window.clearTimeout(searchTimer);
+    resetCharacterRequest();
     if (approvalQuery)
       window.clearTimeout(approvalQuery.timer);
     window.clearTimeout(listingTimeout);
@@ -1450,8 +1573,6 @@ textarea.dc-native { resize:vertical; min-height:92px; }
 .dc-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .dc-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
 .dc-grid:has(> [data-role=duration-field][hidden]) { grid-template-columns:1fr; }
-.dc-page { display:flex; justify-content:space-between; align-items:center; gap:8px; margin:-6px 0 18px; color:var(--lumiverse-text-dim,#9e97ad); font-size:11px; }
-.dc-page .dc-button { font-size:11px; padding:4px 8px; }
 .dc-tabs { display:flex; gap:20px; margin-bottom:24px; border-bottom:1px solid var(--lumiverse-border,#3b3548); }
 .dc-tabs .dc-button { border:0; border-radius:0; border-bottom:2px solid transparent; padding:10px 0; background:transparent; color:var(--lumiverse-text-dim,#9e97ad); font-weight:500; }
 .dc-tabs .dc-button[aria-selected=true] { color:var(--lumiverse-primary,#b59bd6); border-bottom-color:var(--lumiverse-primary,#b59bd6); }
