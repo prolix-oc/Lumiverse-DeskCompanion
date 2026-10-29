@@ -31,12 +31,12 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
       <div data-pane="companion" role="tabpanel" tabindex="0">
         <div class="dc-field"><span>Character</span><select class="dc-native" data-role="character" aria-label="Character"><option value="">Choose a character</option></select></div>
         <div class="dc-field"><span>Model connection</span><select class="dc-native" data-role="connection" aria-label="Model connection"><option value="">Choose a model connection</option></select></div>
-        <div class="dc-field"><span>Desktop</span><select class="dc-native" data-role="device" aria-label="Desktop device"><option value="">Choose a desktop</option></select></div>
+        <div class="dc-field"><span>Desktop display</span><select class="dc-native" data-role="device" aria-label="Desktop display"><option value="">Choose a display</option></select></div>
         <div class="dc-grid"><div class="dc-field"><span>Capture</span><select class="dc-native" data-role="kind" aria-label="Capture type"><option value="image">Screenshot</option><option value="video">Video clip</option></select></div><div class="dc-field" data-role="duration-field" hidden><span>Clip length (seconds)</span><input class="dc-native" data-role="duration" aria-label="Clip duration" type="number" min="1" max="30" step="1" value="3" disabled></div></div>
         <p class="dc-note" data-role="capture-readiness" aria-live="polite"></p>
         <div class="dc-field"><span>Question or direction <span class="dc-optional">Optional</span></span><textarea class="dc-native" data-role="question" aria-label="Optional question or direction" placeholder="What would you like your character to react to?" maxlength="1200"></textarea></div>
         <details data-shared-section><summary>Screen capture setup</summary>
-          <p class="dc-note">Enable screen capture in Desktop, then choose a source on your first share. Select Remember to reuse it.</p>
+          <p class="dc-note">Enable screen capture in Desktop, then choose a display above. Approve that display in Desktop on your first share. To capture a window, use the option to choose a display or window in Desktop.</p>
           <p class="dc-note">To change a saved source, use Forget Screen Capture Approvals in the Desktop tray. Desktop also manages capture permissions and paused requests.</p>
         </details>
       </div>
@@ -381,9 +381,9 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     if (!catalog) return;
     catalog.devices = devices;
     const savedId = settings().deviceId;
-    fill(device, devices.map((entry) => ({ id: entry.id, label: `${entry.name} · ${entry.platform}` })), "Choose a desktop", savedId);
+    fill(device, devices.map((entry) => ({ id: entry.id, label: `${entry.name} · ${entry.platform}` })), "Choose a display", savedId);
     if (savedId && !devices.some((entry) => entry.id === savedId)) {
-      const unavailable = new Option("Saved desktop unavailable — choose a connected desktop", savedId);
+      const unavailable = new Option("Saved display unavailable — choose a connected display", savedId);
       unavailable.disabled = true;
       device.append(unavailable); device.value = savedId;
     }
@@ -530,7 +530,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
       : nativeStatus?.source === "permission_required" ? "Desktop needs screen-recording permission. Open native capture setup."
       : nativeStatus?.source === "missing" ? "Your saved source is unavailable. Choose a source on your next share."
       : nativeStatus?.approval === "remembered" && nativeStatus.source === "ready" ? "Screen source remembered."
-      : nativeStatus?.approval === "required" ? "Choose a screen source on your next share."
+      : nativeStatus?.approval === "required" ? chosenDevice?.displayId ? "Approve this display in Desktop on your next share." : "Choose a screen source on your next share."
       : "";
     const needsAttention = !hasGrants || !catalog || !chosenDevice || needsSettings || voiceInput.checked && !validInput
       || nativeStatus?.approval === "paused" || nativeStatus?.approval === "unavailable" || nativeStatus?.source === "permission_required" || nativeStatus?.source === "missing";

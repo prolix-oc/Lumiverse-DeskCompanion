@@ -37,6 +37,9 @@ export interface ConnectionOption {
 
 export interface DeviceOption {
   id: string;
+  /** Explicit display entries use their opaque display id as the saved dropdown value. */
+  nativeDeviceId?: string;
+  displayId?: string;
   stableIdentity?: boolean;
   name: string;
   platform: string;

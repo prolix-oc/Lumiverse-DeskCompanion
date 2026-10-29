@@ -225,6 +225,33 @@ function mediaSupport(provider, model) {
   return { image, video };
 }
 
+// src/capture-targets.ts
+function captureTargets(devices, now) {
+  return devices.filter((device) => device.expiresAt > now).flatMap((device) => {
+    const picker = {
+      id: device.id,
+      ...device.stableIdentity === true ? { stableIdentity: true } : {},
+      name: safeLabel(device.name),
+      platform: device.platform,
+      image: device.capabilities.image,
+      video: device.capabilities.video
+    };
+    if (!("displays" in device) || !Array.isArray(device.displays))
+      return [picker];
+    const displays = device.displays.filter((display) => record(display) && typeof display.id === "string" && /^[a-f0-9]{64}$/.test(display.id) && typeof display.name === "string" && Number.isInteger(display.width) && Number(display.width) > 0 && Number.isInteger(display.height) && Number(display.height) > 0 && typeof display.primary === "boolean");
+    return [
+      ...displays.map((display) => ({
+        ...picker,
+        id: display.id,
+        nativeDeviceId: device.id,
+        displayId: display.id,
+        name: `${safeLabel(device.name)} \xB7 ${safeLabel(display.name)} \xB7 ${display.width} \xD7 ${display.height}${display.primary ? " \xB7 Primary" : ""}`
+      })),
+      { ...picker, name: `${picker.name} \xB7 Choose a display or window in Desktop` }
+    ];
+  });
+}
+
 // src/capture-flow.ts
 var CAPTURE_PENDING = "Capturing on your desktop. If native setup opens, choose a source and optionally remember it for future shares. Use the native Stop & Discard control to stop.";
 
@@ -587,7 +614,7 @@ function errorCode(error, stage) {
     return "MEDIA_UNSUPPORTED";
   if (/CAPTURE_DESTINATION_CHANGED/.test(message))
     return "DESTINATION_CHANGED";
-  if (/CAPTURE_DEVICE_UNAVAILABLE/.test(message))
+  if (/CAPTURE_(?:DEVICE|DISPLAY)_UNAVAILABLE|DESKTOP_UNAVAILABLE/.test(message))
     return "DEVICE_UNAVAILABLE";
   if (stage === "consent")
     return "CAPTURE_FAILED";
@@ -640,14 +667,7 @@ function installCompanion(api, options = {}) {
   }
   async function listDevices(userId) {
     const devices = await api.desktop.capture.listDevices({ userId });
-    return devices.filter((device) => device.expiresAt > now()).map((device) => ({
-      id: device.id,
-      ...device.stableIdentity === true ? { stableIdentity: true } : {},
-      name: safeLabel(device.name),
-      platform: device.platform,
-      image: device.capabilities.image,
-      video: device.capabilities.video
-    }));
+    return captureTargets(devices, now());
   }
   async function catalog(message, route) {
     const key = JSON.stringify([route.userId, route.frontendSessionId, route.clientId, message.type, message.type === "characters" ? route.id : ""]);
@@ -660,8 +680,18 @@ function installCompanion(api, options = {}) {
       if (!compatible())
         throw new DeskError("HOST_UNSUPPORTED");
       if (message.type === "approval") {
-        const status = (api.host.capabilities["desktop-capture-approval-status-v1"] ?? 0) >= 1 && typeof api.desktop.capture.getApprovalStatus === "function" ? await api.desktop.capture.getApprovalStatus({ deviceId: message.deviceId, connectionId: message.connectionId, kind: message.kind, userId: route.userId }) : { deviceId: message.deviceId, kind: message.kind, approval: "unknown", source: "unknown", checkedAt: now() };
-        send(route, { type: "approval", status: { deviceId: status.deviceId, kind: status.kind, approval: status.approval, source: status.source, checkedAt: status.checkedAt } });
+        const target = (await listDevices(route.userId)).find((candidate) => candidate.id === message.deviceId);
+        if (!target)
+          throw new DeskError("DEVICE_UNAVAILABLE");
+        const query = {
+          deviceId: target.nativeDeviceId ?? target.id,
+          ...target.displayId ? { displayId: target.displayId } : {},
+          connectionId: message.connectionId,
+          kind: message.kind,
+          userId: route.userId
+        };
+        const status = (api.host.capabilities["desktop-capture-approval-status-v1"] ?? 0) >= 1 && typeof api.desktop.capture.getApprovalStatus === "function" ? await api.desktop.capture.getApprovalStatus(query) : { deviceId: message.deviceId, kind: message.kind, approval: "unknown", source: "unknown", checkedAt: now() };
+        send(route, { type: "approval", status: { deviceId: message.deviceId, kind: status.kind, approval: status.approval, source: status.source, checkedAt: status.checkedAt } });
         return;
       }
       if (message.type === "devices") {
@@ -755,17 +785,18 @@ function installCompanion(api, options = {}) {
         throw new DeskError("CHARACTER_UNAVAILABLE");
       if (!connection)
         throw new DeskError("CONNECTION_UNAVAILABLE");
-      const device = devices.find((candidate) => candidate.id === message.deviceId && candidate.expiresAt > now());
+      const device = captureTargets(devices, now()).find((candidate) => candidate.id === message.deviceId);
       if (!device)
         throw new DeskError("DEVICE_UNAVAILABLE");
       const support = mediaSupport(connection.provider, connection.model);
-      if (!support[message.kind] || !device.capabilities[message.kind])
+      if (!support[message.kind] || !device[message.kind])
         throw new DeskError("MEDIA_UNSUPPORTED");
       lastCapture.set(route.userId, now());
       stage = "consent";
       send(run, { type: "status", stage });
       const common = {
-        deviceId: device.id,
+        deviceId: device.nativeDeviceId ?? device.id,
+        ...device.displayId ? { displayId: device.displayId } : {},
         connectionId: connection.id,
         userId: route.userId,
         purpose: `Desk Companion: react naturally as ${safeLabel(character.name, 60)} to one approved ${message.kind === "image" ? "screenshot" : "video-only recording"}, answering my question if provided. No continuous monitoring or computer actions.`

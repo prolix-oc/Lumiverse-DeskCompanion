@@ -905,7 +905,7 @@ describe("configured widget share pipeline", () => {
       await screen.discover(); await screen.synchronize();
       expect(screen.element<HTMLButtonElement>("observe").disabled).toBe(true);
       expect(screen.element<HTMLSelectElement>("device").value).toBe("desktop-a");
-      expect(screen.element<HTMLSelectElement>("device").selectedOptions[0].textContent).toContain("Saved desktop unavailable");
+      expect(screen.element<HTMLSelectElement>("device").selectedOptions[0].textContent).toContain("Saved display unavailable");
       expect(screen.element("capture-readiness").textContent).toContain("choose a desktop in Settings");
       expect(screen.host.requests).toHaveLength(0);
       const control = screen.element<HTMLSelectElement>("device");
@@ -915,6 +915,30 @@ describe("configured widget share pipeline", () => {
       screen.element<HTMLButtonElement>("observe").click(); await settle();
       expect(screen.host.requests[0].deviceId).toBe("desktop-new");
       await screen.approve();
+    } finally { await screen.close(); }
+  });
+
+  test("all three displays appear in settings and selecting the third routes the widget capture without fallback after unplugging it", async () => {
+    const screen = await widget({ approval: true });
+    try {
+      const displays = ["a", "b", "c"].map((id, index) => ({ id: id.repeat(64), name: `Display ${index + 1}`, width: 1920, height: 1080, primary: index === 0 }));
+      Object.assign(screen.host.device, { displays });
+      await screen.discover(); await screen.synchronize();
+      const control = screen.element<HTMLSelectElement>("device");
+      for (const display of displays) expect(Array.from(control.options).find(option => option.value === display.id)?.textContent).toContain(display.name);
+      expect(Array.from(control.options).find(option => option.value === displays[0].id)?.textContent).toContain("Primary");
+      expect(control.value).toBe("desktop-a"); // Existing saved native-picker choice survives the upgrade.
+      control.value = displays[2].id; control.dispatchEvent(new screen.dom.window.Event("input")); await screen.synchronize();
+      expect(screen.host.approvalQueries.at(-1)).toMatchObject({ deviceId: "desktop-a", displayId: displays[2].id });
+      screen.element<HTMLButtonElement>("observe").click(); await settle();
+      expect(screen.host.requests[0]).toMatchObject({ deviceId: "desktop-a", displayId: displays[2].id, kind: "image" });
+      await screen.approve();
+      Object.assign(screen.host.device, { displays: displays.slice(0, 2) });
+      await screen.discover(); await screen.synchronize();
+      expect(control.value).toBe(displays[2].id);
+      expect(control.selectedOptions[0].disabled).toBe(true);
+      expect(screen.element<HTMLButtonElement>("observe").disabled).toBe(true);
+      expect(screen.host.requests).toHaveLength(1);
     } finally { await screen.close(); }
   });
 

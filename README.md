@@ -2,6 +2,8 @@
 
 A Spindle companion that puts a chosen character beside your desktop. Choose a screen source in Lumiverse Desktop and optionally remember its approval. Then share a screenshot or short clip with one widget action, receive a brief reaction in the character's own voice, and optionally hear it through a configured TTS connection. Add a question when you want to steer the conversation.
 
+With the accompanying backend and Desktop display-discovery changes, **Desktop display** lists every connected monitor with its resolution and primary status. Choose one and approve it in native Desktop on the first share. Each monitor has separate approval. The **Choose a display or window in Desktop** option keeps the native picker available. A disconnected saved display becomes unavailable and never switches to another monitor automatically. Update/restart the backend and Desktop, rebuild this extension, then reload its installed bundles to enable this behavior; an extension-only update cannot discover monitors from older Desktop clients.
+
 ## Build and check
 
 Requires Bun 1.4.2+ and the published `lumiverse-spindle-types@0.6.71` package. There are no local SDK paths or runtime dependencies.

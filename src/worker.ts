@@ -1,5 +1,6 @@
 import type { CapturedMediaRef, CharacterDTO, GenerationReasoningOverrideDTO, GenerationRequestDTO, SpindleAPI } from "lumiverse-spindle-types";
 import { assembleMessages } from "./prompt";
+import { captureTargets } from "./capture-targets";
 import { CHANNEL, CHARACTER_PAGE_SIZE, DeskError, ERROR_MESSAGES, MAX_REPLY, characterVoice, mediaSupport, parseClientMessage, record, safeLabel } from "./protocol";
 import type { Catalog, CharacterOption, ClientMessage, DeviceOption, ErrorCode, ServerMessage } from "./protocol";
 import { createCompanionState } from "./companion-state";
@@ -33,7 +34,7 @@ function errorCode(error: unknown, stage: "checking" | "consent" | "generating")
   if (/PERMISSION_DENIED|permission.*not granted/i.test(message)) return "PERMISSION_REQUIRED";
   if (/CAPTURE_PROVIDER_UNSUPPORTED/.test(message)) return "MEDIA_UNSUPPORTED";
   if (/CAPTURE_DESTINATION_CHANGED/.test(message)) return "DESTINATION_CHANGED";
-  if (/CAPTURE_DEVICE_UNAVAILABLE/.test(message)) return "DEVICE_UNAVAILABLE";
+  if (/CAPTURE_(?:DEVICE|DISPLAY)_UNAVAILABLE|DESKTOP_UNAVAILABLE/.test(message)) return "DEVICE_UNAVAILABLE";
   if (stage === "consent") return "CAPTURE_FAILED";
   if (stage === "generating") {
     const status = Number(message.match(/\bfailed\s*\((\d{3})\)/i)?.[1]);
@@ -83,8 +84,7 @@ export function installCompanion(api: SpindleAPI, options: { now?: () => number;
 
   async function listDevices(userId: string): Promise<DeviceOption[]> {
     const devices = await api.desktop.capture.listDevices({ userId });
-    return devices.filter((device) => device.expiresAt > now()).map((device) => ({ id: device.id, ...(device.stableIdentity === true ? { stableIdentity: true } : {}), name: safeLabel(device.name),
-      platform: device.platform, image: device.capabilities.image, video: device.capabilities.video }));
+    return captureTargets(devices, now());
   }
 
   async function catalog(message: Extract<ClientMessage, { type: "catalog" | "characters" | "devices" | "approval" }>, route: Route): Promise<void> {
@@ -94,10 +94,14 @@ export function installCompanion(api: SpindleAPI, options: { now?: () => number;
     try {
       if (!compatible()) throw new DeskError("HOST_UNSUPPORTED");
       if (message.type === "approval") {
+        const target = (await listDevices(route.userId)).find(candidate => candidate.id === message.deviceId);
+        if (!target) throw new DeskError("DEVICE_UNAVAILABLE");
+        const query = { deviceId: target.nativeDeviceId ?? target.id, ...(target.displayId ? { displayId: target.displayId } : {}),
+          connectionId: message.connectionId, kind: message.kind, userId: route.userId };
         const status = (api.host.capabilities["desktop-capture-approval-status-v1"] ?? 0) >= 1 && typeof api.desktop.capture.getApprovalStatus === "function"
-          ? await api.desktop.capture.getApprovalStatus({ deviceId: message.deviceId, connectionId: message.connectionId, kind: message.kind, userId: route.userId })
+          ? await api.desktop.capture.getApprovalStatus(query)
           : { deviceId: message.deviceId, kind: message.kind, approval: "unknown" as const, source: "unknown" as const, checkedAt: now() };
-        send(route, { type: "approval", status: { deviceId: status.deviceId, kind: status.kind, approval: status.approval, source: status.source, checkedAt: status.checkedAt } }); return;
+        send(route, { type: "approval", status: { deviceId: message.deviceId, kind: status.kind, approval: status.approval, source: status.source, checkedAt: status.checkedAt } }); return;
       }
       if (message.type === "devices") {
         send(route, { type: "devices", devices: await listDevices(route.userId) });
@@ -155,14 +159,14 @@ export function installCompanion(api: SpindleAPI, options: { now?: () => number;
       assertActive(run);
       if (!character) throw new DeskError("CHARACTER_UNAVAILABLE");
       if (!connection) throw new DeskError("CONNECTION_UNAVAILABLE");
-      const device = devices.find((candidate) => candidate.id === message.deviceId && candidate.expiresAt > now());
+      const device = captureTargets(devices, now()).find(candidate => candidate.id === message.deviceId);
       if (!device) throw new DeskError("DEVICE_UNAVAILABLE");
       const support = mediaSupport(connection.provider, connection.model);
-      if (!support[message.kind] || !device.capabilities[message.kind]) throw new DeskError("MEDIA_UNSUPPORTED");
+      if (!support[message.kind] || !device[message.kind]) throw new DeskError("MEDIA_UNSUPPORTED");
       lastCapture.set(route.userId, now());
       stage = "consent";
       send(run, { type: "status", stage });
-      const common = { deviceId: device.id, connectionId: connection.id, userId: route.userId,
+      const common = { deviceId: device.nativeDeviceId ?? device.id, ...(device.displayId ? { displayId: device.displayId } : {}), connectionId: connection.id, userId: route.userId,
         purpose: `Desk Companion: react naturally as ${safeLabel(character.name, 60)} to one approved ${message.kind === "image" ? "screenshot" : "video-only recording"}, answering my question if provided. No continuous monitoring or computer actions.` };
       run.capture = await api.desktop.capture.request(message.kind === "image" ? { ...common, kind: "image" }
         : { ...common, kind: "video", mode: "record", durationSeconds: message.durationSeconds });

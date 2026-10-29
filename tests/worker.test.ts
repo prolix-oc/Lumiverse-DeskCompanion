@@ -5,6 +5,18 @@ import { DEFAULT_REACTION_PROMPT } from "../src/prompt";
 import { deferred, fixture, settle } from "./fixtures";
 
 describe("Desk Companion worker", () => {
+  test("a disconnected saved display cannot become a generic desktop capture", async () => {
+    const host = fixture();
+    Object.assign(host.device, { displays: [{ id: "a".repeat(64), name: "Display 1", width: 1920, height: 1080, primary: true }] });
+    const dispose = installCompanion(host.api);
+    try {
+      host.emit(host.message("missing-display", { deviceId: "b".repeat(64) }));
+      await settle();
+      expect(host.requests).toHaveLength(0);
+      expect(host.generations).toHaveLength(0);
+      expect(host.sent.at(-1)?.payload).toMatchObject({ type: "error", code: "DEVICE_UNAVAILABLE" });
+    } finally { dispose(); }
+  });
   test("command actions target one subscriber in the authenticated invoking document and unregister on disposal", async () => {
     const host = fixture(); const dispose = installCompanion(host.api);
     try {
