@@ -77,7 +77,7 @@ describe("real frontend session startup contract", () => {
       await settle();
       expect(host.widgetRoots).toHaveLength(1); expect(host.root.querySelector(".dc-shell")).not.toBeNull();
       expect(host.context.host.capabilities["frontend-session-routing-v1"]).toBeUndefined();
-      expect(host.root.querySelector('[data-role="status"]')?.textContent).toContain("widget is registered");
+      expect(host.root.querySelector<HTMLElement>('[data-role="status"]')?.hidden).toBe(true);
     } finally { dispose(); dispose(); await host.close(); }
   });
   test("native pop-out startup accepts the same origin capability and target dimensions", async () => {
@@ -130,7 +130,7 @@ describe("real frontend session startup contract", () => {
       expect(widget.querySelectorAll("select,input,textarea")).toHaveLength(0);
       expect(settings.querySelectorAll("select,input,textarea").length).toBeGreaterThan(10);
       expect(settings.querySelector('[data-role="observe"]')).toBeNull();
-      expect(host.widgetOptions[0]).toMatchObject({ height: 460 });
+      expect(host.widgetOptions[0]).toMatchObject({ height: 360 });
       expect(host.widgetRoots[0].style.height).toBe("100%");
       expect(host.widgetRoots[0].style.minHeight).toBe("0px");
       expect(host.dom.window.getComputedStyle(widget).overflowY).toBe("auto");

@@ -43,7 +43,7 @@ test("frontend has no capture API, capture IPC, media handles, history writes, o
 test("observation does not require a question to request a default companion reaction", () => {
   const view = source("src/companion-view.ts");
   expect(view).toContain("Optional question or direction");
-  expect(view).toContain("Leave blank for a brief, in-character reaction");
+  expect(view).toContain("What would you like your character to react to?");
   expect(view).not.toContain("!question.value.trim()");
   expect(view).toContain("question.value.length > MAX_QUESTION");
 });

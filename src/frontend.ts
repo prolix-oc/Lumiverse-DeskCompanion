@@ -10,16 +10,13 @@ export function setup(ctx: SpindleFrontendContext): () => void {
     description: "Configure your permissioned desktop companion", keywords: ["desktop", "capture", "character", "voice", "popout", "settings", "configuration"] });
   const about = document.createElement("section");
   about.className = "dc-about";
-  about.innerHTML = `<h2>A character beside your desktop</h2><p>Choose your character, model, desktop, and optional speech once. Then use Look at my screen or a desktop keyboard shortcut whenever you want a reaction. Configure shortcuts below, including an option to skip voice input. Your settings follow you into native pop-outs.</p>
-    <details><summary>First-time setup &amp; desktop controls</summary>
-    <ol><li>Grant UI Panels, Characters, Generation, and the capture permissions. Grant Media for voice input and playback.</li><li>Use Set Up Screen Capture in the extension's permissions, or Enable Extension Screen Capture in Lumiverse Desktop's Browser tray menu. Sign in natively for the same account.</li><li>Choose your character, model, and desktop below. Connected desktops appear automatically. Configure Share workflow for optional voice input that ends on silence, with Whistle on this device or another available STT provider, plus automatic speech.</li><li>On the first share, choose a source in Desktop. Enable Remember this source and approval for this extension to reuse it on later matching shares. Review Before Sending is optional. Your character reacts and, when configured, speaks.</li></ol>
-    <p>To make a system floating pop-out, use the widget's host-provided desktop pop-out control or the desktop tray's Floating Widgets menu. The extension does not create its own browser windows or call native capture IPC.</p>
-    <p>Video currently requires a Gemini-compatible route. Linux capture and rolling replay buffers are not available yet. Use native Stop &amp; Discard to stop a pending capture; this also pauses future requests until Allow Screen Capture Requests Again in the desktop tray. Forget Screen Capture Approvals lets you choose a new source on your next share.</p></details>
-    <div class="dc-row"><button data-role="permissions" type="button">Grant permissions</button><button data-role="show" type="button">Open companion widget</button></div><p data-role="status" role="status"></p>`;
+  about.innerHTML = `<div class="dc-launcher"><button class="dc-button" data-role="permissions" type="button">Grant permissions</button><button class="dc-button" data-role="show" type="button">Open widget</button></div><p class="dc-note" data-role="status" role="status" hidden></p>`;
   tab.root.append(about);
   const permissionButton = about.querySelector<HTMLButtonElement>('[data-role="permissions"]')!;
   const showButton = about.querySelector<HTMLButtonElement>('[data-role="show"]')!;
   const status = about.querySelector<HTMLElement>('[data-role="status"]')!;
+  const launcher = about.querySelector<HTMLElement>(".dc-launcher")!;
+  function notice(message: string): void { status.textContent = message; status.hidden = !message; }
   let disposed = false;
   let destroyWidget: (() => void) | null = null;
   let settingsView: ReturnType<typeof mountView> | null = null;
@@ -27,24 +24,29 @@ export function setup(ctx: SpindleFrontendContext): () => void {
     try {
       const granted = await ctx.permissions.getGranted();
       if (disposed) return;
+      permissionButton.hidden = REQUIRED_PERMISSIONS.every(permission => granted.includes(permission));
       if (!granted.includes("ui_panels")) {
+        about.prepend(launcher);
         const destroy = destroyWidget; destroyWidget = null; destroy?.();
         settingsView?.dispose(); settingsView = null;
-        status.textContent = "Grant UI Panels before opening the widget."; return;
+        notice("Grant UI Panels to configure your companion."); return;
       }
       if ((ctx.host.capabilities["frontend-session-origin-v1"] ?? 0) < 1 || !ctx.frontendSessionId) {
-        status.textContent = "Update Lumiverse's frontend: this demo requires document-scoped frontend session identity."; return;
+        notice("Update Lumiverse: Desk Companion requires document-scoped frontend session identity."); return;
       }
-      if (!settingsView) settingsView = mountView(ctx, about, { surface: "settings", openSettings: () => tab.activate() });
+      if (!settingsView) {
+        settingsView = mountView(ctx, about, { surface: "settings", openSettings: () => tab.activate() });
+        settingsView.panel.querySelector(".dc-header")!.append(launcher);
+      }
       if (destroyWidget) return;
       destroyWidget = mountCompanionWidget(ctx, undefined, () => tab.activate());
-      status.textContent = "The companion widget is registered. Desktop pop-outs use the host's Floating Widgets controls.";
-    } catch { if (!disposed) status.textContent = "Cannot open the widget. Check permissions and the host version."; }
+      notice("");
+    } catch { if (!disposed) notice("Cannot open the widget. Check permissions and the host version."); }
   }
   const showHandler = () => { void show(); };
   const permissionHandler = () => {
     void ctx.permissions.request([...REQUIRED_PERMISSIONS, "screen_recording", "media"], { reason: "Enable an opt-in character desktop companion with optional Media access for voice transcription. Desktop can remember your capture source and approval." })
-      .then(() => show()).catch(() => { if (!disposed) status.textContent = "Permissions were not granted. Capture permissions require administrator/owner approval."; });
+      .then(() => show()).catch(() => { if (!disposed) notice("Capture permissions require administrator or owner approval."); });
   };
   showButton.addEventListener("click", showHandler);
   permissionButton.addEventListener("click", permissionHandler);

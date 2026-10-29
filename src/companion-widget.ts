@@ -10,7 +10,7 @@ export function mountCompanionWidget(ctx: SpindleFrontendContext, target?: Spind
   const removeStyle = ctx.dom.addStyle(STYLES);
   let widget: ReturnType<SpindleFrontendContext["ui"]["createFloatWidget"]> | null = null;
   try {
-    const mounted = ctx.ui.createFloatWidget({ width: target?.width ?? 410, height: target?.height ?? 460,
+    const mounted = ctx.ui.createFloatWidget({ width: target?.width ?? 380, height: target?.height ?? 360,
       initialPosition: { x: 24, y: 72 }, snapToEdge: true, tooltip: "Desk Companion", chromeless: target?.chromeless ?? false });
     widget = mounted;
     Object.assign(mounted.root.style, { width: "100%", height: "100%", minHeight: "0", overflow: "hidden" });

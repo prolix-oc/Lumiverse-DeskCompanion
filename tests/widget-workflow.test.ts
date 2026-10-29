@@ -6,11 +6,17 @@ import { installCompanion } from "../src/worker";
 import { deferred, fixture, settle } from "./fixtures";
 
 async function widget(options: { stt?: Promise<Response>; silence?: Promise<void>; tts?: Promise<Response>; autoplayBlocked?: boolean; microphoneDenied?: boolean; offline?: boolean; approval?: boolean; desktop?: boolean; oldHost?: boolean;
-  hostStt?: boolean; hostSpeech?: boolean; noConnections?: boolean; noMedia?: boolean; providers?: SpindleSTTProviderOption[] } = {}) {
+  sharedControls?: boolean; hostStt?: boolean; hostSpeech?: boolean; noConnections?: boolean; noMedia?: boolean; providers?: SpindleSTTProviderOption[] } = {}) {
   const host = fixture();
   if (options.approval) Object.assign(host.mutable.host.capabilities, { "desktop-capture-approval-status-v1": 1 });
   if (options.oldHost) host.mutable.host.capabilities["command-session-routing-v1"] = 0;
   const editors: Array<{ target: HTMLElement; commandId: string; destroyed: boolean }> = [];
+  const components: Array<{ kind: string; target: HTMLElement; options: any; destroyed: boolean; updates: number }> = [];
+  const mount = (kind: string) => (target: HTMLElement, input: any) => {
+    const component = { kind, target, options: input, destroyed: false, updates: 0 }; components.push(component);
+    const body = target.ownerDocument.createElement("div"); target.append(body);
+    return { body, update(patch: any) { component.options = { ...component.options, ...patch }; component.updates += 1; }, destroy() { component.destroyed = true; body.remove(); } };
+  };
   const approval = deferred<typeof host.capture>();
   const dom = new JSDOM("<main></main>", { url: "https://lumiverse.test/", pretendToBeVisual: true });
   const timers = new Map<number, { callback: () => void; delay: number }>();
@@ -103,7 +109,9 @@ async function widget(options: { stt?: Promise<Response>; silence?: Promise<void
       subscribe(callback: (speaking: boolean) => void) { speechListeners.add(callback); return () => speechListeners.delete(callback); },
     },
     client: { getInfo: () => ({ bridges: { desktop: options.desktop === true } }) },
-    components: { mountKeybindingEditor(target: HTMLElement, input: { commandId: string }) {
+    components: { ...(options.sharedControls === false ? {} : {
+      mountSelect: mount("select"), mountTextArea: mount("textarea"), mountNumericInput: mount("number"), mountSwitch: mount("switch"), mountBadge: mount("badge"), mountCollapsibleSection: mount("section"),
+    }), mountKeybindingEditor(target: HTMLElement, input: { commandId: string }) {
       const editor = { target, commandId: input.commandId, destroyed: false }; editors.push(editor);
       return { destroy() { editor.destroyed = true; } };
     } },
@@ -132,7 +140,7 @@ async function widget(options: { stt?: Promise<Response>; silence?: Promise<void
     }
     await settle();
   };
-  return { host, view, settings, context, dom, outgoing, events, element, enable, synchronize, requests, editors, recognitions, speechCalls, isSpeaking: () => speaking,
+  return { host, view, settings, context, dom, outgoing, events, element, enable, synchronize, requests, editors, components, recognitions, speechCalls, isSpeaking: () => speaking,
     setDevices: (value: typeof devices) => { devices = value; },
     advanceClock: () => { clock += 10001; },
     discover: () => runTimers(10000),
@@ -154,6 +162,63 @@ async function widget(options: { stt?: Promise<Response>; silence?: Promise<void
 }
 
 describe("configured widget share pipeline", () => {
+  test("shared controls save across tabs and windows, follow busy state, and unmount on disposal", async () => {
+    const screen = await widget();
+    try {
+      const field = (label: string) => screen.components.find(component => component.options.ariaLabel === label)!;
+      expect(screen.components.map(component => component.kind)).toEqual(expect.arrayContaining(["select", "textarea", "number", "switch", "badge", "section"]));
+      expect(screen.element("character").hidden).toBe(true);
+      const speech = screen.settings.panel.querySelector<HTMLButtonElement>('[data-tab="speech"]')!;
+      speech.click();
+      expect(screen.settings.panel.querySelector<HTMLElement>('[data-pane="speech"]')!.hidden).toBe(false);
+      expect(screen.settings.panel.querySelector<HTMLElement>('[data-pane="companion"]')!.hidden).toBe(true);
+      field("STT provider").options.onChange("whistle");
+      field("Voice input").options.onChange(true);
+      field("Capture type").options.onChange("video");
+      field("Clip duration").options.onChange(10);
+      field("Optional question or direction").options.onChange("x".repeat(1200));
+      field("Optional question or direction").options.onChange("x".repeat(1201));
+      expect(field("Optional question or direction").options.value).toHaveLength(1200);
+      field("Optional question or direction").options.onChange("What catches your eye?");
+      await screen.synchronize();
+      expect(screen.element("duration-field").hidden).toBe(false);
+      expect(field("STT provider").options.value).toBe("whistle");
+      expect(screen.element("observe").textContent).toBe("Share a video clip");
+      expect(speech.getAttribute("aria-selected")).toBe("true");
+      speech.dispatchEvent(new screen.dom.window.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+      expect(screen.settings.panel.querySelector('[data-tab="shortcuts"]')!.getAttribute("aria-selected")).toBe("true");
+      Object.assign(screen.host.capture, { kind: "video", mimeType: "video/mp4", durationSeconds: 10 });
+      screen.element<HTMLButtonElement>("observe").click(); await settle();
+      expect(field("Capture type").options.disabled).toBe(true);
+      expect(screen.recognitions[0].options.provider).toBe("whistle");
+      expect(screen.host.requests[0].durationSeconds).toBe(10);
+      await screen.approve();
+      expect(screen.host.generations[0].messages[1].content[0].text).toContain("What catches your eye?");
+      expect(field("Capture type").options.disabled).toBe(false);
+      screen.settings.dispose();
+      expect(screen.components.filter(component => screen.settings.panel.contains(component.target))).toHaveLength(0);
+      expect(screen.components.filter(component => component.kind !== "badge").every(component => component.destroyed)).toBe(true);
+    } finally { await screen.close(); }
+    expect(screen.components.every(component => component.destroyed)).toBe(true);
+  });
+
+  test("the compact widget shows only relevant controls and keeps native fields usable on older hosts", async () => {
+    const screen = await widget({ sharedControls: false });
+    try {
+      expect(screen.element("character").hidden).toBe(false);
+      expect(screen.view.panel.querySelector('[data-role="widget-summary"]')).toBeNull();
+      expect(screen.element("capture-readiness").hidden).toBe(true);
+      for (const role of ["cancel", "speak", "stop-speech", "clear"]) expect(screen.element(role).hidden).toBe(true);
+      screen.element<HTMLButtonElement>("observe").click(); await settle();
+      expect(screen.element("cancel").hidden).toBe(false);
+      await screen.approve();
+      expect(screen.element("cancel").hidden).toBe(true);
+      expect(screen.element("clear").hidden).toBe(false);
+      expect(screen.element("speak").hidden).toBe(false);
+      expect(screen.element("status").textContent).toBe("");
+    } finally { await screen.close(); }
+  });
+
   test("a button starts host input synchronously and waits for silence instead of a duration", async () => {
     const silence = deferred<void>(); const screen = await widget({ silence: silence.promise });
     try {
@@ -214,7 +279,8 @@ describe("configured widget share pipeline", () => {
       provider.value = "whistle"; provider.dispatchEvent(new screen.dom.window.Event("input")); await screen.synchronize();
       await screen.enable("voice-input"); await screen.enable("auto-speak");
       expect(screen.element("stt-connection").hidden).toBe(true);
-      expect(screen.element("widget-summary").textContent).toContain("on this device");
+      expect(screen.element("stt-guidance").textContent).toContain("On-device");
+      expect(screen.view.panel.querySelector('[data-role="widget-summary"]')).toBeNull();
       await screen.host.invoke(); await settle();
       expect(screen.recognitions).toHaveLength(1); expect(screen.microphoneRequests()).toBe(1);
       expect(screen.recognitions[0].options.provider).toBe("whistle");
@@ -337,7 +403,7 @@ describe("configured widget share pipeline", () => {
       action.dispatchEvent(new screen.dom.window.Event("change"));
       expect(screen.editors.map(editor => editor.commandId)).toEqual(["share-screen", "share-screen-without-voice"]);
       expect(screen.editors[0].destroyed).toBe(true); expect(screen.editors[1].destroyed).toBe(false);
-      expect(screen.settings.panel.textContent).toContain("Global bindings require Desktop's native opt-in");
+      expect(screen.element("shortcut-help").textContent).toContain("second action skips voice input");
       screen.settings.dispose(); expect(screen.editors.every(editor => editor.destroyed)).toBe(true);
     } finally { await screen.close(); }
     for (const options of [{}, { desktop: true, oldHost: true }]) {
@@ -366,11 +432,11 @@ describe("configured widget share pipeline", () => {
     const screen = await widget({ approval: true });
     try {
       for (const [approval, source, expected] of [
-        ["remembered", "ready", "Source and approval remembered"],
+        ["remembered", "ready", "Screen source remembered"],
         ["paused", "ready", "Capture requests are paused"],
         ["remembered", "missing", "saved source is unavailable"],
         ["remembered", "permission_required", "needs screen-recording permission"],
-        ["required", "unknown", "next share opens native setup"],
+        ["required", "unknown", "Choose a screen source on your next share"],
       ]) {
         screen.host.mutable.desktop.capture.getApprovalStatus = async input => ({ ...input, approval, source, checkedAt: screen.host.now });
         await screen.discover();
@@ -390,9 +456,9 @@ describe("configured widget share pipeline", () => {
       const kind = screen.element<HTMLSelectElement>("kind"); kind.value = "video";
       kind.dispatchEvent(new screen.dom.window.Event("input")); await screen.synchronize();
       old.resolve({ deviceId: "desktop-a", kind: "image", approval: "remembered", source: "ready", checkedAt: screen.host.now }); await settle();
-      expect(screen.element("capture-readiness").textContent).not.toContain("Source and approval remembered");
+      expect(screen.element("capture-readiness").textContent).not.toContain("Screen source remembered");
       await screen.discover();
-      expect(screen.element("capture-readiness").textContent).toContain("next share opens native setup");
+      expect(screen.element("capture-readiness").textContent).toContain("Choose a screen source on your next share");
       const late = deferred<any>(); screen.host.mutable.desktop.capture.getApprovalStatus = async () => late.promise;
       await screen.discover(); await screen.expireApproval();
       late.resolve({ deviceId: "desktop-a", kind: "video", approval: "paused", source: "ready", checkedAt: screen.host.now }); await settle();
@@ -449,7 +515,7 @@ describe("configured widget share pipeline", () => {
       expect(screen.element<HTMLSelectElement>("device").value).toBe("desktop-a");
       expect(screen.element<HTMLButtonElement>("observe").disabled).toBe(false);
       expect(screen.element("badge").textContent).toBe("Ready");
-      expect(screen.element("capture-readiness").textContent).toContain("reuses your saved source and approval when available");
+      expect(screen.element("capture-readiness").hidden).toBe(true);
       expect(screen.host.gets.filter((entry) => entry.kind !== "devices")).toHaveLength(resourceLoads);
       expect(screen.host.requests).toHaveLength(0); expect(screen.host.generations).toHaveLength(0);
       expect(screen.microphoneRequests()).toBe(0); expect(screen.speechCalls).toHaveLength(0);
@@ -464,7 +530,7 @@ describe("configured widget share pipeline", () => {
       expect(screen.element<HTMLButtonElement>("observe").disabled).toBe(true);
       expect(screen.element<HTMLSelectElement>("device").value).toBe("desktop-a");
       expect(screen.element<HTMLSelectElement>("device").selectedOptions[0].textContent).toContain("Saved desktop unavailable");
-      expect(screen.element("capture-readiness").textContent).toContain("choose the new registration in Settings");
+      expect(screen.element("capture-readiness").textContent).toContain("choose a desktop in Settings");
       expect(screen.host.requests).toHaveLength(0);
       const control = screen.element<HTMLSelectElement>("device");
       control.value = "desktop-new"; control.dispatchEvent(new screen.dom.window.Event("input")); await screen.synchronize();
@@ -544,7 +610,7 @@ describe("configured widget share pipeline", () => {
       expect(screen.settings.panel.querySelector<HTMLSelectElement>('[data-role="character"]')!.disabled).toBe(true);
       await screen.approve();
       expect(screen.element("reply").textContent).toBe("You have a calendar open.");
-      expect(screen.settings.panel.querySelector('[data-role="status"]')!.textContent).toContain("Answered using one approved image");
+      expect(screen.settings.panel.querySelector('[data-role="status"]')!.textContent).toBe("");
     } finally { await screen.close(); }
   });
 
@@ -566,7 +632,7 @@ describe("configured widget share pipeline", () => {
       reopened = mountView(screen.context("session-c"), screen.dom.window.document.querySelector("main")!);
       await settle();
       expect(reopened.panel.querySelector('[data-role="reply"]')!.textContent).toBe("You have a calendar open.");
-      expect(reopened.panel.querySelector('[data-role="widget-summary"]')!.textContent).toContain("Mira");
+      expect(reopened.panel.querySelector('[data-role="speaker"]')!.textContent).toContain("Mira");
       expect(reopened.panel.querySelectorAll("select,input,textarea")).toHaveLength(0);
       expect(screen.speechCalls).toHaveLength(1);
       expect(reopened.panel.querySelector('[data-role="speech-status"]')!.textContent).toContain("Speaking in another companion window");

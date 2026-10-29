@@ -1,7 +1,7 @@
 import type { DesktopCaptureApprovalStatus, SpindleFrontendContext, SpindleSTTProviderOption } from "lumiverse-spindle-types";
 import { CHANNEL, CHARACTER_PAGE_SIZE, MAX_QUESTION, REQUIRED_PERMISSIONS, createMessageId, record } from "./protocol";
 import type { Catalog, CharacterOption, ClientMessage, DeviceOption, ServerMessage, VoiceRef } from "./protocol";
-import { CAPTURE_PENDING, CAPTURE_READY } from "./capture-flow";
+import { CAPTURE_PENDING } from "./capture-flow";
 import { MAX_SPEECH_CHARS, listSpeechConnections, speakReply, speechAPI } from "./speech";
 import type { SpeechConnection } from "./speech";
 import { listTranscriptionConnections, recognizeQuestion, speechInputAPI, transcriptionProviders } from "./speech-input";
@@ -10,6 +10,7 @@ import { AutomaticShareSpeech, prepareShareQuestion } from "./share-workflow";
 import { DEFAULT_SETTINGS, parseSettingsPatch } from "./settings";
 import type { CompanionSettings, CompanionSnapshot } from "./settings";
 import { QUICK_SHARE_COMMAND, SHARE_COMMAND } from "./shortcuts";
+import { mountSharedBadge, mountSharedFields, mountSharedSections } from "./shared-ui";
 
 export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, options: { surface?: "widget" | "settings"; openSettings?: () => void } = {}): { panel: HTMLElement; dispose: () => void } {
   const surface = options.surface ?? "widget";
@@ -18,66 +19,75 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
   panel.className = surface === "widget" ? "dc-shell dc-widget" : "dc-shell dc-settings";
   panel.setAttribute("aria-label", "Desk Companion");
   panel.innerHTML = `
-    <header><span class="dc-mark" aria-hidden="true">✦</span><div><h2>Desk Companion</h2><div class="dc-subtitle">Your character, a little closer.</div></div><span class="dc-badge" data-role="badge">Ready</span></header>
+    <header class="dc-header"><h2>Desk Companion</h2><span class="dc-badge" data-role="badge">Ready</span><button class="dc-icon-button" data-role="settings" type="button" aria-label="Companion settings" title="Settings"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="m9 3-1 3-3 1-2 3 2 2-1 3 2 3 3-1 3 2 3-2 3 1 2-3-1-3 2-2-2-3-3-1-1-3Z"/><circle cx="12" cy="12" r="3"/></svg></button></header>
     <div data-view="configuration">
-    <label class="dc-field">Character<select data-role="character" aria-label="Character"><option value="">Grant permissions, then refresh</option></select></label>
-    <div class="dc-page"><button data-role="previous" type="button">Previous</button><span data-role="page">Character library</span><button data-role="next" type="button">Next</button></div>
-    <label class="dc-field">Model connection<select data-role="connection" aria-label="Model connection"><option value="">Choose a multimodal connection</option></select></label>
-    <label class="dc-field">Desktop device<select data-role="device" aria-label="Desktop device"><option value="">Set up screen capture in Desktop</option></select></label>
-    <p class="dc-note" data-role="capture-readiness" aria-live="polite"></p>
-    <details><summary>Screen source &amp; approval</summary>
-      <p class="dc-note">On your first share, choose a source in Desktop and enable Remember this source and approval for this extension to reuse it. Later matching shares go straight to capture. Review Before Sending is optional.</p>
-      <p class="dc-note">Source and approval are managed by Desktop. A different model connection or capture type can need fresh approval. If a source disappears, Desktop opens setup again. To change a saved source, use Forget Screen Capture Approvals in the desktop tray.</p>
-      <p class="dc-note">Stop &amp; Discard also pauses future requests. Use Allow Screen Capture Requests Again in the desktop tray to resume. Updated desktops keep your saved device choice across reconnects and restarts. Older desktops may need their new registration selected here.</p>
-    </details>
-    <div class="dc-row"><label class="dc-field">Capture<select data-role="kind" aria-label="Capture type"><option value="image">Screenshot</option><option value="video">Video clip</option></select></label><label class="dc-field">Clip seconds<input data-role="duration" aria-label="Clip duration" type="number" min="1" max="30" step="1" value="3" disabled></label></div>
-    <div class="dc-destination" data-role="destination">Nothing is captured automatically.</div>
-    <label class="dc-field">Anything on your mind? (optional)<textarea data-role="question" aria-label="Optional question or direction" placeholder="Leave blank for a brief, in-character reaction. Or ask a question…" maxlength="1200"></textarea></label>
-    <details open><summary>Share workflow</summary>
-      <label class="dc-option"><input data-role="auto-speak" type="checkbox"> Speak the character's reply automatically after an approved share</label>
-      <label class="dc-option"><input data-role="voice-input" type="checkbox"> Include a spoken question with each share</label>
-      <div data-role="voice-options" hidden><label class="dc-field">STT provider<select data-role="stt-provider" aria-label="STT provider"><option value="connection">STT connection</option><option value="whistle">Whistle (on this device)</option><option value="webspeech">Web Speech</option></select></label>
-        <label class="dc-field" data-role="stt-connection">STT connection<select data-role="stt" aria-label="STT connection"><option value="">Choose an STT connection</option></select></label>
-        <p class="dc-note" data-role="stt-guidance"></p>
-        <p class="dc-note">Speak naturally. Listening ends after speech followed by silence; Cancel discards the question.</p></div>
-      <p class="dc-note" data-role="workflow-summary">Share → character reaction. Voice input and automatic speech are off.</p>
-      <p class="dc-note" data-role="input-status" role="status"></p>
-    </details>
-    <details open data-role="shortcuts"><summary>Keyboard shortcuts</summary>
-      <p class="dc-note">Share screen follows your Share workflow settings. Share without voice input skips the microphone for that request and keeps your written question and reply settings.</p>
-      <div data-role="shortcut-editors" hidden><label class="dc-field">Shortcut action<select data-role="shortcut-action" aria-label="Shortcut action"><option value="share-screen">Share screen · use Share workflow</option><option value="share-screen-without-voice">Share without voice input</option></select></label>
-      <div data-role="keybinding-editor"></div></div>
-      <p class="dc-note" data-role="shortcut-help">Open this extension in Lumiverse Desktop to configure shortcuts. Keep its integrated browser open and signed in. Global shortcuts can work while the window is in the background.</p>
-    </details>
-    <details data-role="speech-options"><summary>Character voice · text-to-speech</summary>
-      <label class="dc-field">TTS connection<select data-role="tts" aria-label="TTS connection"><option value="">Choose a TTS connection</option></select></label>
-      <div class="dc-row"><button data-role="character-voice" type="button">Use character's TTS connection</button></div>
-      <p class="dc-note">Lumiverse speaks reply text using this connection's default voice and your Voice &amp; Speech playback settings. Configure voice and speed there. Enable automatic speech above, or use Speak reply.</p>
-      <p class="dc-note" data-role="tts-guidance"></p>
-    </details>
-    <footer class="dc-footer"><span data-role="sync-status">Connecting to companion settings…</span><div class="dc-row"><button data-role="refresh" type="button">Refresh</button><button data-role="grant" type="button">Permissions</button></div></footer>
-    <div class="dc-row"><button data-role="cancel" type="button" hidden>Cancel request</button><button data-role="stop-speech" type="button" hidden>Stop speech</button></div>
-    <div class="dc-note" data-role="speech-status" role="status" aria-live="polite"></div>
+      <div class="dc-tabs" role="tablist" aria-label="Companion settings">
+        <button role="tab" data-tab="companion" aria-selected="true" type="button">Companion</button>
+        <button role="tab" data-tab="speech" aria-selected="false" tabindex="-1" type="button">Speech</button>
+        <button role="tab" data-tab="shortcuts" aria-selected="false" tabindex="-1" type="button">Shortcuts</button>
+      </div>
+      <div data-pane="companion" role="tabpanel" tabindex="0">
+        <div class="dc-field"><span>Character</span><select class="dc-native" data-role="character" aria-label="Character"><option value="">Choose a character</option></select></div>
+        <div class="dc-page"><button data-role="previous" type="button" aria-label="Previous character page">Previous</button><span data-role="page">Character library</span><button data-role="next" type="button" aria-label="Next character page">Next</button></div>
+        <div class="dc-field"><span>Model connection</span><select class="dc-native" data-role="connection" aria-label="Model connection"><option value="">Choose a model connection</option></select></div>
+        <div class="dc-field"><span>Desktop</span><select class="dc-native" data-role="device" aria-label="Desktop device"><option value="">Choose a desktop</option></select></div>
+        <div class="dc-grid"><div class="dc-field"><span>Capture</span><select class="dc-native" data-role="kind" aria-label="Capture type"><option value="image">Screenshot</option><option value="video">Video clip</option></select></div><div class="dc-field" data-role="duration-field" hidden><span>Clip length (seconds)</span><input class="dc-native" data-role="duration" aria-label="Clip duration" type="number" min="1" max="30" step="1" value="3" disabled></div></div>
+        <p class="dc-note" data-role="capture-readiness" aria-live="polite"></p>
+        <div class="dc-field"><span>Question or direction <span class="dc-optional">Optional</span></span><textarea class="dc-native" data-role="question" aria-label="Optional question or direction" placeholder="What would you like your character to react to?" maxlength="1200"></textarea></div>
+        <details data-shared-section><summary>Screen capture setup</summary>
+          <p class="dc-note">Enable screen capture in Desktop, then choose a source on your first share. Select Remember to reuse it.</p>
+          <p class="dc-note">To change a saved source, use Forget Screen Capture Approvals in the Desktop tray. Desktop also manages capture permissions and paused requests.</p>
+        </details>
+      </div>
+      <div data-pane="speech" role="tabpanel" tabindex="0" hidden>
+        <section class="dc-group" aria-labelledby="${clientId}-input-title">
+          <div class="dc-toggle-row"><div><h3 id="${clientId}-input-title">Voice input</h3><p class="dc-note">Add a spoken question before capture.</p></div><input class="dc-native" data-role="voice-input" aria-label="Voice input" type="checkbox"></div>
+          <div data-role="voice-options" hidden>
+            <div class="dc-field"><span>Speech recognition</span><select class="dc-native" data-role="stt-provider" aria-label="STT provider"><option value="connection">STT connection</option><option value="whistle">Whistle (on this device)</option><option value="webspeech">Web Speech</option></select></div>
+            <div class="dc-field" data-role="stt-connection"><span>STT connection</span><select class="dc-native" data-role="stt" aria-label="STT connection"><option value="">Choose an STT connection</option></select></div>
+            <p class="dc-note" data-role="stt-guidance"></p>
+          </div>
+          <p class="dc-note" data-role="input-status" role="status"></p>
+        </section>
+        <section class="dc-group" data-role="speech-options" aria-labelledby="${clientId}-output-title">
+          <div class="dc-toggle-row"><div><h3 id="${clientId}-output-title">Spoken replies</h3><p class="dc-note">Read your character's replies automatically.</p></div><input class="dc-native" data-role="auto-speak" aria-label="Automatic spoken replies" type="checkbox"></div>
+          <div class="dc-field"><span>Voice connection</span><select class="dc-native" data-role="tts" aria-label="TTS connection"><option value="">Choose a TTS connection</option></select></div>
+          <button data-role="character-voice" type="button">Use character's voice</button>
+          <p class="dc-note" data-role="tts-guidance"></p>
+        </section>
+        <div class="dc-note" data-role="speech-status" role="status" aria-live="polite"></div>
+      </div>
+      <div data-pane="shortcuts" role="tabpanel" tabindex="0" hidden>
+        <div data-role="shortcuts">
+          <div data-role="shortcut-editors" hidden><div class="dc-field"><span>Action</span><select class="dc-native" data-role="shortcut-action" aria-label="Shortcut action"><option value="share-screen">Share screen</option><option value="share-screen-without-voice">Share without voice input</option></select></div><div class="dc-keybindings" data-role="keybinding-editor"></div></div>
+          <p class="dc-note" data-role="shortcut-help">Open Lumiverse Desktop to configure keyboard shortcuts.</p>
+        </div>
+      </div>
+      <footer class="dc-footer"><span data-role="sync-status" role="status">Connecting…</span><div class="dc-row"><button data-role="refresh" type="button">Refresh</button><button data-role="grant" type="button">Permissions</button></div></footer>
+      <div class="dc-row"><button data-role="cancel" type="button" hidden>Cancel request</button><button data-role="stop-speech" type="button" hidden>Stop speech</button></div>
     </div>
     <div data-view="triggers">
-      <div class="dc-destination" data-role="widget-summary">Configure your companion in the Desk Companion sidebar.</div>
-      <p class="dc-note" data-role="capture-readiness" aria-live="polite"></p>
+      <p class="dc-note" data-role="capture-readiness" aria-live="polite" hidden></p>
       <button data-role="check-devices" type="button" hidden>Check desktops</button>
-      <div class="dc-row dc-actions"><button class="dc-primary" data-role="observe" type="button" disabled>Look at my screen</button><button data-role="cancel" type="button" disabled>Cancel request</button></div>
-      <div class="dc-reply"><div class="dc-reply-name" data-role="speaker">A fresh perspective</div><div class="dc-reply-text" data-role="reply">Your character's response appears here. Replies stay in companion memory, not chat history.</div></div>
-      <div class="dc-row"><button data-role="speak" type="button" disabled>Speak reply</button><button data-role="stop-speech" type="button">Stop speech</button><button data-role="clear" type="button">Clear</button></div>
+      <div class="dc-row dc-actions"><button class="dc-primary" data-role="observe" type="button" disabled>Look at my screen</button><button data-role="cancel" type="button" hidden>Cancel</button></div>
+      <div class="dc-reply"><div class="dc-reply-name" data-role="speaker" hidden></div><div class="dc-reply-text" data-role="reply">Share your screen to hear from your character.</div></div>
+      <footer class="dc-reply-actions"><button data-role="speak" type="button" hidden>Speak reply</button><button data-role="stop-speech" type="button" hidden>Stop speech</button><button data-role="clear" type="button" hidden>Clear</button></footer>
       <div class="dc-note" data-role="speech-status" role="status" aria-live="polite"></div>
-      <footer class="dc-footer"><span>One request. One approved capture.</span><button data-role="settings" type="button">Settings</button></footer>
     </div>
-    <div class="dc-status" data-role="status" role="status" aria-live="polite">Connecting to the companion…</div>`;
+    <div class="dc-status" data-role="status" role="status" aria-live="polite">Connecting…</div>`;
   const configuration = panel.querySelector<HTMLElement>('[data-view="configuration"]')!;
   const triggers = panel.querySelector<HTMLElement>('[data-view="triggers"]')!;
   if (surface === "widget") configuration.remove(); else triggers.remove();
+  if (surface === "settings") (panel.querySelector('[data-role="settings"]') as HTMLElement).hidden = true;
+  for (const button of panel.querySelectorAll("button")) button.classList.add("dc-button");
+  const elements = new Map<string, HTMLElement>();
+  for (const container of [panel, configuration, triggers]) for (const child of container.querySelectorAll<HTMLElement>("[data-role]")) {
+    if (!elements.has(child.dataset.role!)) elements.set(child.dataset.role!, child);
+  }
   root.append(panel);
 
   function element<ElementType extends HTMLElement>(role: string): ElementType {
-    const selector = `[data-role="${role}"]`;
-    const found = panel.querySelector<ElementType>(selector) ?? configuration.querySelector<ElementType>(selector) ?? triggers.querySelector<ElementType>(selector);
+    const found = elements.get(role) as ElementType | undefined;
     if (!found) throw new Error("Desk Companion UI could not mount.");
     return found;
   }
@@ -133,6 +143,27 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
   let automaticRequestId: string | null = null;
   const listingController = new AbortController();
   const cleanups: Array<() => void> = [];
+  const destroySections = surface === "settings" ? mountSharedSections(ctx, configuration) : () => {};
+  const fields = mountSharedFields(ctx, surface === "settings" ? configuration : document.createElement("div"));
+  const sharedBadge = mountSharedBadge(ctx, badge);
+  cleanups.push(destroySections, () => fields.destroy(), () => sharedBadge.destroy());
+  const tabs = Array.from(configuration.querySelectorAll<HTMLButtonElement>("[role=tab]"));
+  function activateTab(tab: HTMLButtonElement): void {
+    for (const button of tabs) { const active = button === tab; button.setAttribute("aria-selected", String(active)); button.tabIndex = active ? 0 : -1; }
+    for (const pane of configuration.querySelectorAll<HTMLElement>("[data-pane]")) pane.hidden = pane.dataset.pane !== tab.dataset.tab;
+  }
+  for (const [index, tab] of tabs.entries()) {
+    const pane = configuration.querySelector<HTMLElement>(`[data-pane="${tab.dataset.tab}"]`)!;
+    tab.id = `${clientId}-tab-${index}`; pane.id = `${clientId}-pane-${index}`;
+    tab.setAttribute("aria-controls", pane.id); pane.setAttribute("aria-labelledby", tab.id);
+    listen(tab, "click", () => activateTab(tab));
+    const navigate = (event: KeyboardEvent) => {
+      const next = event.key === "ArrowRight" ? (index + 1) % tabs.length : event.key === "ArrowLeft" ? (index + tabs.length - 1) % tabs.length : event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : -1;
+      if (next < 0) return;
+      event.preventDefault(); activateTab(tabs[next]); tabs[next].focus();
+    };
+    tab.addEventListener("keydown", navigate); cleanups.push(() => tab.removeEventListener("keydown", navigate));
+  }
 
   function mountShortcuts(): void {
     if (surface !== "settings" || shortcutsMounted || !snapshot) return;
@@ -150,7 +181,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
       const editor = ctx.components.mountKeybindingEditor(element("keybinding-editor"), { commandId });
       shortcutCleanups.push(() => editor.destroy());
       element("shortcut-editors").hidden = false;
-      help.textContent = "Choose a focused or global binding here. Global bindings require Desktop's native opt-in. Keep the integrated browser open and signed in; a global binding can work while it is in the background.";
+      help.textContent = "Share screen uses your speech settings. The second action skips voice input.";
     } catch {
       for (const cleanup of shortcutCleanups.splice(0)) cleanup();
       help.textContent = "The shortcut editor could not open. Configure Desk Companion in Desktop Settings → Key Bindings, then reopen this panel."; }
@@ -264,21 +295,21 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     chooseDefaults();
   }
 
-  function applyCharacterVoice(): void {
+  function applyCharacterVoice(silent = false): void {
     const chosen = surface === "settings" ? selectedCharacter()?.voice : completedVoice ?? selectedCharacter()?.voice;
     if (chosen && speechConnections.some((entry) => entry.id === chosen.connectionId)) {
       tts.value = chosen.connectionId;
       queueSettings({ ttsId: tts.value });
-      element("speech-status").textContent = "Using the character's TTS connection with its default voice and your Lumiverse playback settings.";
+      if (!silent) element("speech-status").textContent = "Character voice selected.";
     } else {
-      element("speech-status").textContent = "No accessible character TTS connection is configured. Choose a TTS connection.";
+      if (!silent) element("speech-status").textContent = "Choose a voice connection; this character has none available.";
     }
     updateControls();
   }
 
   function initializeCharacterVoice(): void {
     if (!initializeVoice || surface !== "settings" || !selectedCharacter() || !speechConnections.length) return;
-    initializeVoice = false; applyCharacterVoice();
+    initializeVoice = false; applyCharacterVoice(true);
   }
 
   function discoverInputProviders(): void {
@@ -311,15 +342,16 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     voiceInput.disabled = busy || !inputAPI;
     element("voice-options").hidden = !voiceInput.checked;
     element("stt-connection").hidden = !connectionInput;
-    element("tts-guidance").textContent = !outputAPI ? "Update Lumiverse to use speech playback through Spindle. Sharing without speech is still available."
-      : !granted.includes("media") ? "Use Permissions to grant Media for speech playback." : "Playback uses Lumiverse's audio controls. Stop speech also stops the host playback in this document.";
-    element("stt-guidance").textContent = inputAPI && !granted.includes("media") ? "Use Permissions to grant Media for voice input. Screen sharing without voice input is still available."
+    element("tts-guidance").textContent = !outputAPI ? "Update Lumiverse to enable spoken replies."
+      : !granted.includes("media") ? "Use Permissions to grant Media for speech playback." : "Voice and playback settings are managed in Voice & Speech.";
+    element("stt-guidance").textContent = inputAPI && !granted.includes("media") ? "Use Permissions to grant Media for voice input."
       : !providerReady ? provider?.unavailableReason === "hostUpdate" ? "Update Lumiverse to use speech recognition through Spindle."
-        : "This STT provider is unavailable in this window. Check Voice & Speech settings or choose another provider."
-      : connectionInput ? "Microphone audio is sent to the selected STT connection."
-        : sttProvider.value === "whistle" ? "Whistle transcribes on this device using Lumiverse's shared model. No API key is needed; the model may load on first use."
-          : "Recognition uses the host's speech engine. Processing location depends on your browser or device.";
+        : "Unavailable in this window. Choose another provider or check Voice & Speech."
+      : connectionInput ? "Audio is sent to this connection. Listening ends on silence."
+        : sttProvider.value === "whistle" ? "On-device recognition. Listening ends on silence."
+          : "Uses your browser or device's speech engine. Listening ends on silence.";
     duration.disabled = busy || !video;
+    element("duration-field").hidden = !video;
     const needsSettings = !hasGrants || !supported || !character.value || !current.characterId || !current.connectionId || !current.deviceId
       || character.value !== current.characterId || connection.value !== current.connectionId || device.value !== current.deviceId
       || question.value.length > MAX_QUESTION || (video && !validDuration) || (autoSpeak.checked && !validVoice);
@@ -329,10 +361,13 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     element<HTMLButtonElement>("observe").disabled = surface !== "widget" || !canShare;
     element("observe").textContent = video ? "Share a video clip" : "Look at my screen";
     element<HTMLButtonElement>("cancel").disabled = !busy || stage === "cancelling";
-    if (surface === "settings") {
-      element("cancel").hidden = !busy;
-      element("stop-speech").hidden = !speechController && snapshot?.activity.speechStage === "idle";
-    }
+    element("cancel").hidden = !busy;
+    const speaking = speechController !== null || Boolean(snapshot && snapshot.activity.speechStage !== "idle");
+    element("stop-speech").hidden = !speaking;
+    element("speak").hidden = !completedText || speaking || !validVoice;
+    element("clear").hidden = !completedText || busy;
+    element("speaker").hidden = !completedText && !snapshot?.activity.text;
+    reply.parentElement!.dataset.empty = String(!completedText && !busy);
     element<HTMLButtonElement>("speak").disabled = busy || !completedText || !validVoice || speechController !== null || completedText.length > MAX_SPEECH_CHARS;
     element<HTMLButtonElement>("character-voice").disabled = busy;
     element<HTMLButtonElement>("refresh").disabled = busy || catalogId !== null || devicesId !== null;
@@ -345,31 +380,26 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     badge.textContent = busy ? stage === "listening" ? "Listening" : stage === "transcribing" ? "Transcribing" : stage === "consent" ? "Capturing" : stage === "generating" ? "Thinking" : stage === "cancelling" ? "Cancelling" : "Checking"
       : !snapshot ? "Connecting" : !hasGrants ? "Permissions" : !catalog ? "Loading" : saving || Object.keys(pendingPatch).length ? "Saving" : needsSettings || voiceInput.checked && !validInput ? "Setup needed" : "Ready";
     const nativeStatus = approval?.key === approvalKey() ? approval.status : null;
-    element("capture-readiness").textContent = !hasGrants ? "Grant the extension's permissions to set up screen capture."
-      : !catalog ? "Finding your capture desktops…"
-      : !chosenDevice ? current.deviceId
-        ? "Your saved desktop is offline. Reconnect it and it will reappear automatically. Older clients may need you to choose the new registration in Settings."
-        : "Set Up Screen Capture in the extension's permissions or desktop tray. Connected desktops appear automatically."
-      : needsSettings || voiceInput.checked && !validInput ? "Finish choosing your character, model, and share options in Settings. The shortcut without voice input can share without an STT connection."
-      : nativeStatus?.approval === "paused" ? "Capture requests are paused. Use Allow Screen Capture Requests Again in the Desktop tray, then share again."
-      : nativeStatus?.approval === "unavailable" ? "Desktop could not check approval. Check its connection and native capture setup before sharing."
-      : nativeStatus?.source === "permission_required" ? "Desktop needs screen-recording permission. Open native capture setup to grant it before sharing."
-      : nativeStatus?.source === "missing" ? "Your saved source is unavailable. Your next share opens native setup so you can choose a source."
-      : nativeStatus?.approval === "remembered" && nativeStatus.source === "ready" ? "Source and approval remembered for this model and capture type. Your next share goes straight to capture."
-      : nativeStatus?.approval === "required" ? "Your next share opens native setup. Choose a source and enable Remember to reuse it for this model and capture type."
-      : CAPTURE_READY;
-    element("capture-readiness").hidden = busy;
-    const destination = element("destination");
-    destination.textContent = chosenConnection ? `${chosenConnection.provider} · ${chosenConnection.model} · ${chosenDevice?.name ?? "choose a desktop"}${supported ? "" : " · media not supported"}` : "Choose the model destination before requesting a capture.";
-    const inputDestination = connectionInput ? transcriptionConnections.find((entry) => entry.id === stt.value) : provider;
-    const speechDestination = speechConnections.find((entry) => entry.id === tts.value);
-    element("workflow-summary").textContent = `${voiceInput.checked ? `Speak until silence → ${inputDestination?.name ?? "choose STT"} → ` : ""}Approved share → character reaction${autoSpeak.checked ? ` → ${speechDestination?.name ?? "choose TTS below"}` : " (text only)"}.`
-      + (voiceInput.checked ? connectionInput ? " Microphone audio goes to the selected STT connection before screen capture; no background listening."
-        : sttProvider.value === "whistle" ? " Whistle transcribes microphone audio on this device before screen capture; no background listening."
-          : " The host's speech engine transcribes your question before screen capture; no background listening." : " Voice input is off.");
-    element("widget-summary").textContent = `${selectedCharacter()?.name ?? "Choose a character in the sidebar"} · ${video ? `Video ${duration.value}s` : "Screenshot"}\n${destination.textContent}\n${element("workflow-summary").textContent}`;
-    element("sync-status").textContent = !snapshot ? "Connecting to companion settings…" : saving || Object.keys(pendingPatch).length
-      ? "Saving settings…" : "Settings synchronized across companion windows.";
+    const readiness = element("capture-readiness");
+    readiness.textContent = !hasGrants ? "Grant permissions to enable screen sharing."
+      : !catalog ? "Finding desktops…"
+      : !chosenDevice ? current.deviceId ? "Your saved desktop is offline. Reconnect it or choose a desktop in Settings."
+        : "Set Up Screen Capture in Lumiverse Desktop to connect a desktop."
+      : chosenConnection && !supported ? `This model or desktop does not support ${video ? "video clips" : "screenshots"}. Change the model or capture type in Settings.`
+      : needsSettings || voiceInput.checked && !validInput ? "Finish setup in Settings to share your screen."
+      : nativeStatus?.approval === "paused" ? "Capture requests are paused. Resume them in the Desktop tray."
+      : nativeStatus?.approval === "unavailable" ? "Cannot check capture approval. Check Desktop's connection."
+      : nativeStatus?.source === "permission_required" ? "Desktop needs screen-recording permission. Open native capture setup."
+      : nativeStatus?.source === "missing" ? "Your saved source is unavailable. Choose a source on your next share."
+      : nativeStatus?.approval === "remembered" && nativeStatus.source === "ready" ? "Screen source remembered."
+      : nativeStatus?.approval === "required" ? "Choose a screen source on your next share."
+      : "";
+    const needsAttention = !hasGrants || !catalog || !chosenDevice || needsSettings || voiceInput.checked && !validInput
+      || nativeStatus?.approval === "paused" || nativeStatus?.approval === "unavailable" || nativeStatus?.source === "permission_required" || nativeStatus?.source === "missing";
+    readiness.hidden = busy || !readiness.textContent || surface === "widget" && !needsAttention;
+    element("sync-status").textContent = !snapshot ? "Connecting…" : saving || Object.keys(pendingPatch).length ? "Saving…" : "Saved";
+    element("page").parentElement!.hidden = !catalog || catalog.characterTotal <= CHARACTER_PAGE_SIZE;
+    fields.sync(); sharedBadge.sync();
     discoverApproval();
   }
 
@@ -385,7 +415,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     if (clearAutomatic) automaticSpeech.cancel();
     element("input-status").textContent = "";
     stopSpeech(); completedText = ""; completedVoice = null;
-    reply.textContent = "Your character's response appears here. Nothing is saved to chat history.";
+    reply.textContent = "Share your screen to hear from your character.";
     element("speaker").textContent = "A fresh perspective";
     element("speech-status").textContent = "";
     updateControls();
@@ -516,10 +546,10 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
       stage = incoming.activity.stage;
       completedText = stage === "idle" ? incoming.activity.text : "";
       completedVoice = incoming.activity.voice;
-      reply.textContent = incoming.activity.text || "Your character's response appears here. Nothing is saved to chat history.";
+      reply.textContent = incoming.activity.text || "Share your screen to hear from your character.";
       element("speaker").textContent = incoming.activity.characterName;
       notice(inputController && incoming.activity.ownerClientId === clientId && inputMessage && !incoming.activity.error
-        ? inputMessage : incoming.activity.message, incoming.activity.error);
+        ? inputMessage : incoming.activity.stage === "idle" && incoming.activity.text && !incoming.activity.error ? "" : incoming.activity.message, incoming.activity.error);
       if (incoming.activity.speechClientId !== clientId && incoming.activity.speechStage !== "idle") {
         element("speech-status").textContent = `${incoming.activity.speechStage === "playing" ? "Speaking" : incoming.activity.speechStage === "ready" ? "Audio is ready" : "Synthesizing speech"} in another companion window.`;
         element("speech-status").dataset.shared = "true";
@@ -578,8 +608,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
       if (stage === "cancelling") { runId = null; stage = "idle"; clearReply(); notice("Observation cancelled; no automatic speech."); updateControls(); return; }
       runId = null; stage = "idle"; completedText = message.text; completedVoice = message.voice;
       reply.textContent = message.text; element("speaker").textContent = message.characterName;
-      const capture = message.capture;
-      notice(`Answered using one approved ${capture.kind}: ${capture.width} × ${capture.height}${capture.durationSeconds === undefined ? "" : ` · ${capture.durationSeconds.toFixed(1)}s`}. The capture handle is single-use and released.`);
+      notice("");
       if (message.text.length > MAX_SPEECH_CHARS) element("speech-status").textContent = "Reply exceeds the 2,400-character speech limit. Ask for a shorter answer.";
       else if (chosenVoice) void speak(chosenVoice);
     } else if (message.type === "error") {
@@ -626,15 +655,15 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
       void reservation.catch(() => {});
       const beginInput = () => {
         stage = "listening";
-        inputMessage = "Speak naturally. Listening ends after speech followed by silence. Microphone access may prompt for permission.";
+        inputMessage = "Listening… pause when you finish.";
         notice(inputMessage); updateControls();
         return prepareShareQuestion(request.question, recognizeQuestion(inputProvider, stt.value, controller.signal, inputAPI, (status) => {
           if (disposed || controller.signal.aborted || inputController !== controller) return;
           stage = status.phase === "processing" ? "transcribing" : "listening";
           send({ type: "input-stage", targetId: requestId, stage: stage as "listening" | "transcribing" });
           inputMessage = status.phase === "loading" ? `Loading ${inputProvider === "whistle" ? "Whistle on this device" : "speech recognition"}${typeof status.progress === "number" ? ` · ${Math.round(Math.max(0, Math.min(1, status.progress)) * 100)}%` : ""}…`
-            : status.phase === "processing" ? "Microphone stopped. Transcribing your question before requesting screen capture…"
-              : "Speak naturally. Pause when you finish; listening stops automatically.";
+            : status.phase === "processing" ? "Transcribing your question…"
+              : "Listening… pause when you finish.";
           notice(inputMessage); updateControls();
         }), controller.signal);
       };
@@ -678,7 +707,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
   listen(element("speak"), "click", () => { void speak(); });
   listen(element("stop-speech"), "click", () => { automaticSpeech.cancel(); stopSpeech(); send({ type: "stop-speech" }); element("speech-status").textContent = "Speech stopped; pending automatic speech is disabled for this share."; });
   listen(element("settings"), "click", () => { options.openSettings ? options.openSettings() : send({ type: "open-settings" }); });
-  listen(element("character-voice"), "click", applyCharacterVoice);
+  listen(element("character-voice"), "click", () => applyCharacterVoice());
   listen(character, "change", () => { queueSettings({ characterId: character.value }); clearReply(); applyCharacterVoice(); });
   for (const { key, control } of settingsControls) listen(control, "input", () => {
     const value = key === "autoSpeak" || key === "voiceInput" ? (control as HTMLInputElement).checked
@@ -707,7 +736,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     chooseDefaults();
     initializeCharacterVoice();
     updateControls();
-  }).catch(() => { if (!disposed) element("speech-status").textContent = "Configure a TTS connection in Voice settings, then reopen the widget. Observation still works without speech."; });
+  }).catch(() => { if (!disposed) element("speech-status").textContent = "Voice connections could not be loaded. Reopen settings to retry."; });
   discoverInputProviders();
   const inputListing = listTranscriptionConnections(ctx, listingController.signal).then((connections) => {
     if (disposed) return;
@@ -715,7 +744,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     fill(stt, connections.map((entry) => ({ id: entry.id, label: `${entry.name} · ${entry.provider}` })), "Choose an STT connection", settings().sttId);
     chooseDefaults();
     updateControls();
-  }).catch(() => { if (!disposed) element("input-status").textContent = "STT connections could not be listed. Whistle can still be selected when available; reopen the companion to retry connections."; });
+  }).catch(() => { if (!disposed) element("input-status").textContent = "STT connections could not be loaded. Choose Whistle or reopen settings to retry."; });
   void Promise.allSettled([speechListing, inputListing]).finally(() => window.clearTimeout(listingTimeout));
   const resynchronize = () => { if (!disposed && document.visibilityState !== "hidden") { discoverInputProviders(); send({ type: "subscribe", surface }); refresh(); updateControls(); } };
   window.addEventListener("pageshow", resynchronize);
