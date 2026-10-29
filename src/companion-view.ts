@@ -137,6 +137,8 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
   let pendingPatch: Partial<CompanionSettings> = {};
   let saving: { id: string; patch: Partial<CompanionSettings> } | null = null;
   let saveTimer: number | null = null;
+  let saveTimeout: number | null = null;
+  let subscription: { id: string; timer: number } | null = null;
   let pendingBegin: { id: string; resolve: () => void; reject: (error: Error) => void } | null = null;
   let initializeVoice = false;
   let automaticRequestId: string | null = null;
@@ -293,10 +295,34 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     }
   }
 
+  function retainSettingsEdits(): void {
+    if (saveTimeout !== null) window.clearTimeout(saveTimeout);
+    saveTimeout = null;
+    if (saving) pendingPatch = { ...saving.patch, ...pendingPatch };
+    saving = null;
+  }
+
+  function subscribe(): void {
+    if (disposed || disposing || subscription) return;
+    const id = createMessageId();
+    const timer = window.setTimeout(() => {
+      subscription = null;
+      if (!disposed) { notice("Desk Companion could not reconnect. Refresh to try again; your edits are kept in this window.", true); updateControls(); }
+    }, 8000);
+    subscription = { id, timer };
+    send({ type: "subscribe", surface }, id);
+    updateControls();
+  }
+
   function flushSettings(): void {
-    if (disposed || !snapshot || saving || !Object.keys(pendingPatch).length) return;
+    if (disposed || !snapshot || subscription || saving || !Object.keys(pendingPatch).length) return;
     const patch = pendingPatch; pendingPatch = {};
     const id = createMessageId(); saving = { id, patch };
+    saveTimeout = window.setTimeout(() => {
+      saveTimeout = null;
+      if (disposed || saving?.id !== id) return;
+      retainSettingsEdits(); subscribe();
+    }, 8000);
     send({ type: "configure", patch }, id); updateControls();
   }
 
@@ -413,7 +439,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     const needsSettings = !hasGrants || !supported || !character.value || !current.characterId || !current.connectionId || !current.deviceId
       || character.value !== current.characterId || connection.value !== current.connectionId || device.value !== current.deviceId
       || question.value.length > MAX_QUESTION || (video && !validDuration) || (autoSpeak.checked && !validVoice);
-    const blocked = !snapshot || busy || saving !== null || Object.keys(pendingPatch).length > 0 || needsSettings;
+    const blocked = !snapshot || subscription !== null || busy || saving !== null || Object.keys(pendingPatch).length > 0 || needsSettings;
     canQuickShare = !blocked;
     canShare = !blocked && (!voiceInput.checked || validInput);
     element<HTMLButtonElement>("observe").disabled = surface !== "widget" || !canShare;
@@ -434,7 +460,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     element<HTMLButtonElement>("check-devices").disabled = catalogId !== null || devicesId !== null;
     badge.dataset.busy = String(busy);
     badge.textContent = busy ? stage === "listening" ? "Listening" : stage === "transcribing" ? "Transcribing" : stage === "consent" ? "Capturing" : stage === "generating" ? "Thinking" : stage === "cancelling" ? "Cancelling" : "Checking"
-      : !snapshot ? "Connecting" : !hasGrants ? "Permissions" : !catalog ? "Loading" : saving || Object.keys(pendingPatch).length ? "Saving" : needsSettings || voiceInput.checked && !validInput ? "Setup needed" : "Ready";
+      : subscription ? "Reconnecting" : !snapshot ? "Connecting" : !hasGrants ? "Permissions" : !catalog ? "Loading" : saving || Object.keys(pendingPatch).length ? "Saving" : needsSettings || voiceInput.checked && !validInput ? "Setup needed" : "Ready";
     const nativeStatus = approval?.key === approvalKey() ? approval.status : null;
     const readiness = element("capture-readiness");
     readiness.textContent = !hasGrants ? "Grant permissions to enable screen sharing."
@@ -442,7 +468,9 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
       : !chosenDevice ? current.deviceId ? "Your saved desktop is offline. Reconnect it or choose a desktop in Settings."
         : "Set Up Screen Capture in Lumiverse Desktop to connect a desktop."
       : chosenConnection && !supported ? `This model or desktop does not support ${video ? "video clips" : "screenshots"}. Change the model or capture type in Settings.`
-      : needsSettings || voiceInput.checked && !validInput ? "Finish setup in Settings to share your screen."
+      : autoSpeak.checked && !validVoice ? "Choose a voice connection in Speech, or turn off spoken replies."
+      : voiceInput.checked && !validInput ? "Check speech recognition in Speech, or turn off voice input."
+      : needsSettings ? "Choose a character, model connection, and desktop in Settings."
       : nativeStatus?.approval === "paused" ? "Capture requests are paused. Resume them in the Desktop tray."
       : nativeStatus?.approval === "unavailable" ? "Cannot check capture approval. Check Desktop's connection."
       : nativeStatus?.source === "permission_required" ? "Desktop needs screen-recording permission. Open native capture setup."
@@ -453,7 +481,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     const needsAttention = !hasGrants || !catalog || !chosenDevice || needsSettings || voiceInput.checked && !validInput
       || nativeStatus?.approval === "paused" || nativeStatus?.approval === "unavailable" || nativeStatus?.source === "permission_required" || nativeStatus?.source === "missing";
     readiness.hidden = busy || !readiness.textContent || surface === "widget" && !needsAttention;
-    element("sync-status").textContent = !snapshot ? "Connecting…" : saving || Object.keys(pendingPatch).length ? "Saving…" : "Saved";
+    element("sync-status").textContent = subscription ? "Reconnecting…" : !snapshot ? "Connecting…" : saving || Object.keys(pendingPatch).length ? "Saving…" : "Saved";
     fields.sync(); sharedBadge.sync();
     discoverApproval();
   }
@@ -571,9 +599,23 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
       if (!message.speechOnly && (message.targetId === pendingBegin?.id || message.targetId === snapshot?.activity.requestId)) inputController?.abort();
       return;
     }
+    if (message.type === "error" && message.code === "SESSION_REQUIRED") {
+      retainSettingsEdits();
+      if (pendingBegin) { const pending = pendingBegin; pendingBegin = null; pending.reject(new Error("Desk Companion is reconnecting. Share again once it is ready.")); }
+      automaticSpeech.cancel(); inputController?.abort(); speechController?.abort();
+      subscribe();
+      return;
+    }
+    if (message.id === subscription?.id) {
+      window.clearTimeout(subscription.timer); subscription = null;
+      if (message.type === "error") { notice(message.message, true); updateControls(); return; }
+    }
     if (message.type === "state") {
       const incoming = message.snapshot;
-      if (saving?.id === message.id) saving = null;
+      if (saving?.id === message.id) {
+        if (saveTimeout !== null) window.clearTimeout(saveTimeout);
+        saveTimeout = null; saving = null;
+      }
       if (pendingBegin?.id === message.id && snapshot && incoming.epoch === snapshot.epoch && incoming.sequence <= snapshot.sequence) {
         const pending = pendingBegin; pendingBegin = null;
         if (snapshot.activity.requestId === pending.id && snapshot.activity.ownerClientId === clientId && snapshot.activity.stage !== "idle") pending.resolve();
@@ -587,7 +629,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
       const restarted = Boolean(snapshot && incoming.epoch !== snapshot.epoch);
       if (restarted) {
         automaticSpeech.cancel(); automaticRequestId = null; inputController?.abort(); stopSpeech(); runId = null;
-        saving = null; pendingPatch = {}; catalogId = null; devicesId = null; catalog = null;
+        retainSettingsEdits(); catalogId = null; devicesId = null; catalog = null;
         if (approvalQuery) window.clearTimeout(approvalQuery.timer);
         approvalQuery = null; approval = null; approvalCheckedKey = "";
         for (const cleanup of shortcutCleanups.splice(0)) cleanup();
@@ -628,7 +670,8 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
       const pending = pendingBegin; pendingBegin = null; pending.reject(new Error(message.message)); return;
     }
     if (message.type === "error" && saving?.id === message.id) {
-      saving = null; pendingPatch = {}; applySettings(); notice(message.message, true); updateControls(); return;
+      if (saveTimeout !== null) window.clearTimeout(saveTimeout);
+      saveTimeout = null; saving = null; pendingPatch = {}; applySettings(); notice(message.message, true); updateControls(); return;
     }
     if (message.id === devicesId) {
       devicesId = null;
@@ -774,7 +817,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
   listen(element("observe"), "click", () => { void share(); });
   listen(element("cancel"), "click", () => cancel());
   listen(element("clear"), "click", () => { cancel(); clearReply(); send({ type: "clear-state" }); });
-  listen(element("refresh"), "click", () => refresh());
+  listen(element("refresh"), "click", () => { retainSettingsEdits(); subscribe(); refresh(); });
   listen(element("check-devices"), "click", () => { if (catalog) discoverDevices(); else refresh(); });
   listen(element("shortcut-action"), "change", () => {
     for (const cleanup of shortcutCleanups.splice(0)) cleanup();
@@ -807,7 +850,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     }
     void ctx.permissions.getGranted().then((permissions) => { if (!disposed) { granted = permissions; refresh(); updateControls(); } }).catch(() => {});
   }));
-  void ctx.permissions.getGranted().then((permissions) => { if (!disposed) { granted = permissions; send({ type: "subscribe", surface }); updateControls(); } })
+  void ctx.permissions.getGranted().then((permissions) => { if (!disposed) { granted = permissions; subscribe(); updateControls(); } })
     .catch(() => { if (!disposed) notice("Cannot read grants. Check the extension's permissions.", true); });
   const listingTimeout = window.setTimeout(() => listingController.abort(), 15000);
   const speechListing = listSpeechConnections(ctx, listingController.signal).then((connections) => {
@@ -827,7 +870,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     updateControls();
   }).catch(() => { if (!disposed) element("input-status").textContent = "STT connections could not be loaded. Choose Whistle or reopen settings to retry."; });
   void Promise.allSettled([speechListing, inputListing]).finally(() => window.clearTimeout(listingTimeout));
-  const resynchronize = () => { if (!disposed && document.visibilityState !== "hidden") { discoverInputProviders(); send({ type: "subscribe", surface }); refresh(); updateControls(); } };
+  const resynchronize = () => { if (!disposed && document.visibilityState !== "hidden") { discoverInputProviders(); retainSettingsEdits(); subscribe(); refresh(); updateControls(); } };
   window.addEventListener("pageshow", resynchronize);
   window.addEventListener("online", resynchronize);
   document.addEventListener("visibilitychange", resynchronize);
@@ -836,7 +879,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
   window.addEventListener("focus", refreshInputProviders);
   // Discovery only: never request a capture, input, generation, or speech here.
   let discoveryTimer: number;
-  const pollDevices = () => { discoverDevices(); discoveryTimer = window.setTimeout(pollDevices, 10000); };
+  const pollDevices = () => { if (!disposed && document.visibilityState !== "hidden") subscribe(); discoverDevices(); discoveryTimer = window.setTimeout(pollDevices, 10000); };
   discoveryTimer = window.setTimeout(pollDevices, 10000);
   cleanups.push(() => { window.removeEventListener("pageshow", resynchronize); window.removeEventListener("online", resynchronize); document.removeEventListener("visibilitychange", resynchronize); window.removeEventListener("focus", discoverDevices); window.removeEventListener("focus", refreshInputProviders); window.clearTimeout(discoveryTimer); });
   updateControls();
@@ -850,6 +893,9 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     disposed = true; listingController.abort(); stopSpeech();
     pendingBegin?.reject(new Error("Companion window closed.")); pendingBegin = null;
     if (saveTimer !== null) window.clearTimeout(saveTimer);
+    if (saveTimeout !== null) window.clearTimeout(saveTimeout);
+    if (subscription) window.clearTimeout(subscription.timer);
+    subscription = null;
     if (devicesTimeout !== null) window.clearTimeout(devicesTimeout);
     if (catalogTimeout !== null) window.clearTimeout(catalogTimeout);
     if (searchTimer !== null) window.clearTimeout(searchTimer);

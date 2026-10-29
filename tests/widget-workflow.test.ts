@@ -6,7 +6,7 @@ import { installCompanion } from "../src/worker";
 import { CHARACTER, deferred, fixture, settle } from "./fixtures";
 
 async function widget(options: { stt?: Promise<Response>; silence?: Promise<void>; tts?: Promise<Response>; autoplayBlocked?: boolean; microphoneDenied?: boolean; offline?: boolean; approval?: boolean; desktop?: boolean; oldHost?: boolean;
-  characterLibrary?: boolean; legacyPicker?: boolean; sharedControls?: boolean; hostStt?: boolean; hostSpeech?: boolean; noConnections?: boolean; noMedia?: boolean; providers?: SpindleSTTProviderOption[] } = {}) {
+  dropInitialSubscription?: boolean; characterLibrary?: boolean; legacyPicker?: boolean; sharedControls?: boolean; hostStt?: boolean; hostSpeech?: boolean; noConnections?: boolean; noMedia?: boolean; providers?: SpindleSTTProviderOption[] } = {}) {
   const host = fixture();
   const library = Array.from({ length: 125 }, (_, i) => ({ ...CHARACTER, id: i === 0 ? CHARACTER.id : `character-${i}`,
     name: i === 0 ? CHARACTER.name : i === 120 ? "Zelda" : `Companion ${i}`,
@@ -66,6 +66,7 @@ async function widget(options: { stt?: Promise<Response>; silence?: Promise<void
     for (const handler of [...(backendMessages.get(routing?.frontendSessionId ?? "") ?? [])]) handler(payload);
   };
   const uninstall = installCompanion(host.api, { now: () => clock });
+  let droppedSubscription = false;
   function context(sessionId: string): SpindleFrontendContext { return { manifest: { identifier: "desk_companion" },
     host: { ...host.mutable.host, capabilities: { "frontend-session-origin-v1": 1, ...(options.characterLibrary && !options.legacyPicker ? { "shared-select-pagination-v1": 1 } : {}), ...(options.hostStt !== false ? { "speech-to-text-v1": 1 } : {}), ...(options.hostSpeech !== false ? { "text-to-speech-v1": 1, "connection-kinds-v1": 1 } : {}) } }, frontendSessionId: sessionId,
     ...(options.hostStt !== false ? { stt: {
@@ -130,7 +131,15 @@ async function widget(options: { stt?: Promise<Response>; silence?: Promise<void
     permissions: { async getGranted() { return ["ui_panels", "characters", "generation", "screen_capture", "screen_recording", ...(options.noMedia ? [] : ["media"])]; } },
     getActiveChat: () => ({ characterId: "character-a", chatId: null }),
     events: { on(name: string, callback: (payload: unknown) => void) { events.set(name, callback); return () => events.delete(name); } },
-    sendToBackend(payload: unknown) { outgoing.push(payload); host.emit(payload, "user-a", sessionId); },
+    sendToBackend(payload: any) {
+      outgoing.push(payload);
+      if (options.dropInitialSubscription && !droppedSubscription && payload.type === "configure") {
+        droppedSubscription = true;
+        host.events.get("FRONTEND_SESSION_CLOSED")?.({ frontendSessionId: sessionId }, "user-a");
+        setTimeout(() => host.emit(payload, "user-a", sessionId), 0); return;
+      }
+      host.emit(payload, "user-a", sessionId);
+    },
     onBackendMessage(callback: (payload: unknown) => void) {
       const handlers = backendMessages.get(sessionId) ?? new Set(); handlers.add(callback); backendMessages.set(sessionId, handlers);
       return () => { handlers.delete(callback); };
@@ -175,6 +184,69 @@ async function widget(options: { stt?: Promise<Response>; silence?: Promise<void
 }
 
 describe("configured widget share pipeline", () => {
+  test("recovers a settings subscription lost during setup without losing visible choices", async () => {
+    const screen = await widget({ dropInitialSubscription: true });
+    try {
+      await screen.synchronize();
+      expect(screen.settings.panel.querySelector('[data-role="badge"]')!.textContent).toBe("Ready");
+      expect(screen.settings.panel.querySelector('[data-role="status"]')!.textContent).toBe("");
+      expect(screen.element<HTMLButtonElement>("observe").disabled).toBe(false);
+      const field = screen.components.find(c => c.options.ariaLabel === "Capture type")!;
+      field.options.onChange("video"); await screen.synchronize();
+      expect(field.options.value).toBe("video");
+      expect(screen.element("observe").textContent).toBe("Share a video clip");
+      expect(screen.requests).toHaveLength(0); expect(screen.recognitions).toHaveLength(0);
+    } finally { await screen.close(); }
+  });
+
+  test("reconnects after a lost save acknowledgement and keeps newer edits", async () => {
+    const screen = await widget();
+    const deliver = screen.host.mutable.sendToFrontend;
+    let dropped = false;
+    screen.host.mutable.sendToFrontend = (payload: any, userId, route) => {
+      if (!dropped && route?.frontendSessionId === "session-a" && payload.type === "state"
+        && screen.outgoing.some(message => message.type === "configure" && message.id === payload.id)) { dropped = true; return; }
+      deliver(payload, userId, route);
+    };
+    try {
+      const field = screen.components.find(c => c.options.ariaLabel === "Optional question or direction")!;
+      field.options.onChange("First edit"); await screen.synchronize();
+      field.options.onChange("Keep the latest edit");
+      await screen.expireDiscovery(); await screen.synchronize();
+      expect(dropped).toBe(true);
+      expect(field.options.value).toBe("Keep the latest edit");
+      expect(screen.element<HTMLButtonElement>("observe").disabled).toBe(false);
+      expect(screen.settings.panel.querySelector('[data-role="sync-status"]')!.textContent).toBe("Saved");
+      expect(screen.requests).toHaveLength(0); expect(screen.recognitions).toHaveLength(0);
+    } finally { screen.host.mutable.sendToFrontend = deliver; await screen.close(); }
+  });
+
+  test("a lost share subscription reconnects without replaying microphone input or capture", async () => {
+    const screen = await widget();
+    try {
+      await screen.enable("voice-input");
+      const emit = screen.host.emit;
+      let disconnected = false;
+      screen.host.emit = (payload: any, userId, sessionId) => {
+        if (!disconnected && payload.type === "begin-share") {
+          disconnected = true;
+          setTimeout(() => {
+            screen.host.events.get("FRONTEND_SESSION_CLOSED")?.({ frontendSessionId: sessionId }, userId);
+            setTimeout(() => emit(payload, userId, sessionId), 0);
+          }, 0);
+        } else emit(payload, userId, sessionId);
+      };
+      screen.element<HTMLButtonElement>("observe").click(); await settle(); await screen.synchronize();
+      expect(screen.recognitions).toHaveLength(1);
+      expect(screen.recognitions[0].cancelled || screen.recognitions[0].finished).toBe(true);
+      expect(screen.host.requests).toHaveLength(0); expect(screen.host.generations).toHaveLength(0); expect(screen.speechCalls).toHaveLength(0);
+      expect(screen.element<HTMLButtonElement>("observe").disabled).toBe(false);
+      screen.element<HTMLButtonElement>("observe").click(); await settle();
+      expect(screen.recognitions).toHaveLength(2);
+      expect(screen.host.requests).toHaveLength(1);
+    } finally { await screen.close(); }
+  });
+
   test("character picker loads on scroll, searches the library and retains selection and thumbnails", async () => {
     const screen = await widget({ characterLibrary: true });
     try {

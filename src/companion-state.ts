@@ -128,14 +128,16 @@ export function createCompanionState(api: SpindleAPI, cancelRun: (route: Route) 
         if (state.owner && routeKey(state.owner) === key && !state.capturing) cancel(state);
         return;
       }
-      if (!state.subscribers.has(key)) throw new DeskError("INVALID_REQUEST");
+      if (!state.subscribers.has(key)) throw new DeskError("SESSION_REQUIRED");
       if (message.type === "configure") {
         if (state.activity.stage !== "idle") throw new DeskError("BUSY");
         const settings = { ...state.settings, ...message.patch };
         const revision = state.revision + 1;
         await api.userStorage.setJson(SETTINGS_PATH, { revision, settings }, { userId: route.userId });
         if (disposed) return;
-        state.settings = settings; state.revision = revision; broadcast(state, route);
+        state.settings = settings; state.revision = revision;
+        if (state.activity.error) { state.activity.error = false; state.activity.message = ""; }
+        broadcast(state, route);
       } else if (message.type === "begin-share") {
         checkBegin(route);
         if (state.activity.stage !== "idle") throw new DeskError("BUSY");

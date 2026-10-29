@@ -4,7 +4,7 @@ A Spindle companion that puts a chosen character beside your desktop. Choose a s
 
 ## Build and check
 
-Requires Bun 1.4.2+ and the published `lumiverse-spindle-types@0.6.69` package. There are no local SDK paths or runtime dependencies.
+Requires Bun 1.4.2+ and the published `lumiverse-spindle-types@0.6.71` package. There are no local SDK paths or runtime dependencies.
 
 ```sh
 bun install --frozen-lockfile
@@ -67,7 +67,9 @@ Configuration persists per account and synchronizes with reopened widgets. Micro
 
 All service access routes through Spindle. `ctx.connections.list({ kind: 'tts' | 'stt' })` discovers credential-free speech profiles, `ctx.stt` handles transcription, and `ctx.tts` handles playback. There are no direct HTTP/REST requests or REST fallbacks in extension code. Speech needs the corresponding `speech-to-text-v1`, `text-to-speech-v1`, and `connection-kinds-v1` capabilities and the `media` grant. Older hosts show update guidance while text-only sharing continues. Existing saved settings migrate to the connection provider; voice input and automatic speech remain opt-in.
 
-Version 0.1.7 adds the shared character picker with thumbnails, full-library search, and scroll loading. It requires the accompanying frontend/backend picker support for these features; older hosts preload pages for local selection. The additive Spindle contract is prepared in `lumiverse-spindle-types` 0.6.71 for publication. The extension retains its published SDK dependency until that release is available.
+Version 0.1.8 restores the panel subscription after a connection drop, retains pending settings edits while reconnecting, and recovers missing save acknowledgements. Refresh reconnects settings as well as resource discovery. Recovery never replays microphone input, capture, or generation.
+
+Version 0.1.7 adds the shared character picker with thumbnails, full-library search, and scroll loading. It requires the accompanying frontend/backend picker support for these features; older hosts preload pages for local selection. Uses the published `lumiverse-spindle-types` 0.6.71 contract.
 
 Version 0.1.6 uses Spindle types 0.6.69, adds Whistle and Spindle-only speech access, embeds the host's keybinding editors, adds account/document-scoped capture commands, and uses stable desktop IDs and approval discovery. Update the installed extension and reload its frontend. Shortcuts need the accompanying backend routing change and a Desktop build with keybinding support; stable identity and approval discovery need the corresponding native/backend builds. The capture request shape is unchanged.
 

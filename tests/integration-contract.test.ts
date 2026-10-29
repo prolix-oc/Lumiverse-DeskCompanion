@@ -19,7 +19,7 @@ test("declares distinct main and lightweight system widget entries", () => {
   expect(source("src/frontend.ts")).toContain("export function setup");
   expect(source("src/companion-widget.ts")).toContain("ctx.ui.createFloatWidget");
   expect(source("src/companion-widget.ts")).toContain("spindle:desktop-widget-returned");
-  expect(source("package.json")).toContain('"lumiverse-spindle-types": "0.6.69"');
+  expect(source("package.json")).toContain('"lumiverse-spindle-types": "0.6.71"');
   expect(JSON.parse(source("package.json")).version).toBe(manifest.version);
 });
 

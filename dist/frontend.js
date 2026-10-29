@@ -523,6 +523,8 @@ function mountView(ctx, root, options = {}) {
   let pendingPatch = {};
   let saving = null;
   let saveTimer = null;
+  let saveTimeout = null;
+  let subscription = null;
   let pendingBegin = null;
   let initializeVoice = false;
   let automaticRequestId = null;
@@ -724,13 +726,43 @@ function mountView(ctx, root, options = {}) {
       }
     }
   }
+  function retainSettingsEdits() {
+    if (saveTimeout !== null)
+      window.clearTimeout(saveTimeout);
+    saveTimeout = null;
+    if (saving)
+      pendingPatch = { ...saving.patch, ...pendingPatch };
+    saving = null;
+  }
+  function subscribe() {
+    if (disposed || disposing || subscription)
+      return;
+    const id = createMessageId();
+    const timer = window.setTimeout(() => {
+      subscription = null;
+      if (!disposed) {
+        notice("Desk Companion could not reconnect. Refresh to try again; your edits are kept in this window.", true);
+        updateControls();
+      }
+    }, 8000);
+    subscription = { id, timer };
+    send({ type: "subscribe", surface }, id);
+    updateControls();
+  }
   function flushSettings() {
-    if (disposed || !snapshot || saving || !Object.keys(pendingPatch).length)
+    if (disposed || !snapshot || subscription || saving || !Object.keys(pendingPatch).length)
       return;
     const patch = pendingPatch;
     pendingPatch = {};
     const id = createMessageId();
     saving = { id, patch };
+    saveTimeout = window.setTimeout(() => {
+      saveTimeout = null;
+      if (disposed || saving?.id !== id)
+        return;
+      retainSettingsEdits();
+      subscribe();
+    }, 8000);
     send({ type: "configure", patch }, id);
     updateControls();
   }
@@ -849,7 +881,7 @@ function mountView(ctx, root, options = {}) {
     duration.disabled = busy || !video;
     element("duration-field").hidden = !video;
     const needsSettings = !hasGrants || !supported || !character.value || !current.characterId || !current.connectionId || !current.deviceId || character.value !== current.characterId || connection.value !== current.connectionId || device.value !== current.deviceId || question.value.length > MAX_QUESTION || video && !validDuration || autoSpeak.checked && !validVoice;
-    const blocked = !snapshot || busy || saving !== null || Object.keys(pendingPatch).length > 0 || needsSettings;
+    const blocked = !snapshot || subscription !== null || busy || saving !== null || Object.keys(pendingPatch).length > 0 || needsSettings;
     canQuickShare = !blocked;
     canShare = !blocked && (!voiceInput.checked || validInput);
     element("observe").disabled = surface !== "widget" || !canShare;
@@ -869,13 +901,13 @@ function mountView(ctx, root, options = {}) {
     element("check-devices").hidden = surface !== "widget" || busy || Boolean(chosenDevice) || !hasGrants;
     element("check-devices").disabled = catalogId !== null || devicesId !== null;
     badge.dataset.busy = String(busy);
-    badge.textContent = busy ? stage === "listening" ? "Listening" : stage === "transcribing" ? "Transcribing" : stage === "consent" ? "Capturing" : stage === "generating" ? "Thinking" : stage === "cancelling" ? "Cancelling" : "Checking" : !snapshot ? "Connecting" : !hasGrants ? "Permissions" : !catalog ? "Loading" : saving || Object.keys(pendingPatch).length ? "Saving" : needsSettings || voiceInput.checked && !validInput ? "Setup needed" : "Ready";
+    badge.textContent = busy ? stage === "listening" ? "Listening" : stage === "transcribing" ? "Transcribing" : stage === "consent" ? "Capturing" : stage === "generating" ? "Thinking" : stage === "cancelling" ? "Cancelling" : "Checking" : subscription ? "Reconnecting" : !snapshot ? "Connecting" : !hasGrants ? "Permissions" : !catalog ? "Loading" : saving || Object.keys(pendingPatch).length ? "Saving" : needsSettings || voiceInput.checked && !validInput ? "Setup needed" : "Ready";
     const nativeStatus = approval?.key === approvalKey() ? approval.status : null;
     const readiness = element("capture-readiness");
-    readiness.textContent = !hasGrants ? "Grant permissions to enable screen sharing." : !catalog ? "Finding desktops…" : !chosenDevice ? current.deviceId ? "Your saved desktop is offline. Reconnect it or choose a desktop in Settings." : "Set Up Screen Capture in Lumiverse Desktop to connect a desktop." : chosenConnection && !supported ? `This model or desktop does not support ${video ? "video clips" : "screenshots"}. Change the model or capture type in Settings.` : needsSettings || voiceInput.checked && !validInput ? "Finish setup in Settings to share your screen." : nativeStatus?.approval === "paused" ? "Capture requests are paused. Resume them in the Desktop tray." : nativeStatus?.approval === "unavailable" ? "Cannot check capture approval. Check Desktop's connection." : nativeStatus?.source === "permission_required" ? "Desktop needs screen-recording permission. Open native capture setup." : nativeStatus?.source === "missing" ? "Your saved source is unavailable. Choose a source on your next share." : nativeStatus?.approval === "remembered" && nativeStatus.source === "ready" ? "Screen source remembered." : nativeStatus?.approval === "required" ? "Choose a screen source on your next share." : "";
+    readiness.textContent = !hasGrants ? "Grant permissions to enable screen sharing." : !catalog ? "Finding desktops…" : !chosenDevice ? current.deviceId ? "Your saved desktop is offline. Reconnect it or choose a desktop in Settings." : "Set Up Screen Capture in Lumiverse Desktop to connect a desktop." : chosenConnection && !supported ? `This model or desktop does not support ${video ? "video clips" : "screenshots"}. Change the model or capture type in Settings.` : autoSpeak.checked && !validVoice ? "Choose a voice connection in Speech, or turn off spoken replies." : voiceInput.checked && !validInput ? "Check speech recognition in Speech, or turn off voice input." : needsSettings ? "Choose a character, model connection, and desktop in Settings." : nativeStatus?.approval === "paused" ? "Capture requests are paused. Resume them in the Desktop tray." : nativeStatus?.approval === "unavailable" ? "Cannot check capture approval. Check Desktop's connection." : nativeStatus?.source === "permission_required" ? "Desktop needs screen-recording permission. Open native capture setup." : nativeStatus?.source === "missing" ? "Your saved source is unavailable. Choose a source on your next share." : nativeStatus?.approval === "remembered" && nativeStatus.source === "ready" ? "Screen source remembered." : nativeStatus?.approval === "required" ? "Choose a screen source on your next share." : "";
     const needsAttention = !hasGrants || !catalog || !chosenDevice || needsSettings || voiceInput.checked && !validInput || nativeStatus?.approval === "paused" || nativeStatus?.approval === "unavailable" || nativeStatus?.source === "permission_required" || nativeStatus?.source === "missing";
     readiness.hidden = busy || !readiness.textContent || surface === "widget" && !needsAttention;
-    element("sync-status").textContent = !snapshot ? "Connecting…" : saving || Object.keys(pendingPatch).length ? "Saving…" : "Saved";
+    element("sync-status").textContent = subscription ? "Reconnecting…" : !snapshot ? "Connecting…" : saving || Object.keys(pendingPatch).length ? "Saving…" : "Saved";
     fields.sync();
     sharedBadge.sync();
     discoverApproval();
@@ -1034,10 +1066,36 @@ function mountView(ctx, root, options = {}) {
         inputController?.abort();
       return;
     }
+    if (message.type === "error" && message.code === "SESSION_REQUIRED") {
+      retainSettingsEdits();
+      if (pendingBegin) {
+        const pending = pendingBegin;
+        pendingBegin = null;
+        pending.reject(new Error("Desk Companion is reconnecting. Share again once it is ready."));
+      }
+      automaticSpeech.cancel();
+      inputController?.abort();
+      speechController?.abort();
+      subscribe();
+      return;
+    }
+    if (message.id === subscription?.id) {
+      window.clearTimeout(subscription.timer);
+      subscription = null;
+      if (message.type === "error") {
+        notice(message.message, true);
+        updateControls();
+        return;
+      }
+    }
     if (message.type === "state") {
       const incoming = message.snapshot;
-      if (saving?.id === message.id)
+      if (saving?.id === message.id) {
+        if (saveTimeout !== null)
+          window.clearTimeout(saveTimeout);
+        saveTimeout = null;
         saving = null;
+      }
       if (pendingBegin?.id === message.id && snapshot && incoming.epoch === snapshot.epoch && incoming.sequence <= snapshot.sequence) {
         const pending = pendingBegin;
         pendingBegin = null;
@@ -1061,8 +1119,7 @@ function mountView(ctx, root, options = {}) {
         inputController?.abort();
         stopSpeech();
         runId = null;
-        saving = null;
-        pendingPatch = {};
+        retainSettingsEdits();
         catalogId = null;
         devicesId = null;
         catalog = null;
@@ -1128,6 +1185,9 @@ function mountView(ctx, root, options = {}) {
       return;
     }
     if (message.type === "error" && saving?.id === message.id) {
+      if (saveTimeout !== null)
+        window.clearTimeout(saveTimeout);
+      saveTimeout = null;
       saving = null;
       pendingPatch = {};
       applySettings();
@@ -1357,7 +1417,11 @@ function mountView(ctx, root, options = {}) {
     clearReply();
     send({ type: "clear-state" });
   });
-  listen(element("refresh"), "click", () => refresh());
+  listen(element("refresh"), "click", () => {
+    retainSettingsEdits();
+    subscribe();
+    refresh();
+  });
   listen(element("check-devices"), "click", () => {
     if (catalog)
       discoverDevices();
@@ -1440,7 +1504,7 @@ function mountView(ctx, root, options = {}) {
   ctx.permissions.getGranted().then((permissions) => {
     if (!disposed) {
       granted = permissions;
-      send({ type: "subscribe", surface });
+      subscribe();
       updateControls();
     }
   }).catch(() => {
@@ -1476,7 +1540,8 @@ function mountView(ctx, root, options = {}) {
   const resynchronize = () => {
     if (!disposed && document.visibilityState !== "hidden") {
       discoverInputProviders();
-      send({ type: "subscribe", surface });
+      retainSettingsEdits();
+      subscribe();
       refresh();
       updateControls();
     }
@@ -1494,6 +1559,8 @@ function mountView(ctx, root, options = {}) {
   window.addEventListener("focus", refreshInputProviders);
   let discoveryTimer;
   const pollDevices = () => {
+    if (!disposed && document.visibilityState !== "hidden")
+      subscribe();
     discoverDevices();
     discoveryTimer = window.setTimeout(pollDevices, 1e4);
   };
@@ -1522,6 +1589,11 @@ function mountView(ctx, root, options = {}) {
     pendingBegin = null;
     if (saveTimer !== null)
       window.clearTimeout(saveTimer);
+    if (saveTimeout !== null)
+      window.clearTimeout(saveTimeout);
+    if (subscription)
+      window.clearTimeout(subscription.timer);
+    subscription = null;
     if (devicesTimeout !== null)
       window.clearTimeout(devicesTimeout);
     if (catalogTimeout !== null)

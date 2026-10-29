@@ -110,6 +110,7 @@ function createMessageId() {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 var ERROR_MESSAGES = {
+  SESSION_REQUIRED: "Desk Companion needs to reconnect before saving or sharing. Refresh to reconnect.",
   SETTINGS_FAILED: "Companion settings could not be loaded or saved. Refresh before sharing; no capture was requested.",
   SETTINGS_CHANGED: "Companion settings changed in another window. Review the updated settings, then share again.",
   INVALID_REQUEST: "Choose a character, connection, and desktop. An optional question must be at most 1,200 characters.",
@@ -388,7 +389,7 @@ function createCompanionState(api, cancelRun, checkBegin) {
         return;
       }
       if (!state.subscribers.has(key))
-        throw new DeskError("INVALID_REQUEST");
+        throw new DeskError("SESSION_REQUIRED");
       if (message.type === "configure") {
         if (state.activity.stage !== "idle")
           throw new DeskError("BUSY");
@@ -399,6 +400,10 @@ function createCompanionState(api, cancelRun, checkBegin) {
           return;
         state.settings = settings;
         state.revision = revision;
+        if (state.activity.error) {
+          state.activity.error = false;
+          state.activity.message = "";
+        }
         broadcast(state, route);
       } else if (message.type === "begin-share") {
         checkBegin(route);

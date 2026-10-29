@@ -50,6 +50,21 @@ describe("authoritative companion state", () => {
     } finally { dispose(); }
   });
 
+  test("saving valid settings clears a previous idle workflow error", async () => {
+    const host = fixture(); const dispose = installCompanion(host.api);
+    const sidebar = client(host, "sidebar-a", "document-a");
+    try {
+      sidebar("subscribe"); await settle();
+      sidebar("configure", { patch: READY_SETTINGS }); await settle();
+      sidebar("begin-share", { revision: 1 }, "share-a"); await settle();
+      sidebar("input-ended", { targetId: "share-a", message: "A previous request could not continue." }); await settle();
+      expect(host.sent.at(-1)?.payload.snapshot.activity.error).toBe(true);
+      sidebar("configure", { patch: { kind: "video", durationSeconds: 10 } }); await settle();
+      expect(host.sent.at(-1)?.payload.snapshot.activity).toMatchObject({ stage: "idle", error: false, message: "" });
+      expect(host.requests).toHaveLength(0); expect(host.generations).toHaveLength(0);
+    } finally { dispose(); }
+  });
+
   test("reopening and restarting restores preferences but never persists or auto-replays a reply", async () => {
     const host = fixture(); let dispose = installCompanion(host.api);
     const sidebar = client(host, "sidebar-a", "document-a");
@@ -112,7 +127,7 @@ describe("authoritative companion state", () => {
       popout("begin-share", { revision: 1 }, "share-a"); await settle();
       host.emit(host.message("share-a", { clientId: "widget-a" }), "user-a", "document-b"); await settle();
       client(host, "outsider", "document-other")("cancel-shared", { targetId: "share-a" }); await settle();
-      expect(host.sent.at(-1)?.payload.code).toBe("INVALID_REQUEST");
+      expect(host.sent.at(-1)?.payload.code).toBe("SESSION_REQUIRED");
       sidebar("cancel-shared", { targetId: "share-a" }); await settle();
       expect(host.sent.some((entry) => entry.payload.type === "stop-local" && entry.options?.frontendSessionId === "document-b")).toBe(true);
       approval.resolve(host.capture); await settle();
