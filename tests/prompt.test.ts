@@ -3,6 +3,47 @@ import { assembleMessages, DEFAULT_REACTION_PROMPT } from "../src/prompt";
 import { CHARACTER, fixture } from "./fixtures";
 
 describe("character-driven companion prompt", () => {
+  test("adapts card voice and example turns independently for different installed characters", () => {
+    for (const [name, personality, reply] of [
+      ["Lumen", "An exuberant idol who speaks with playful excitement.", "Eee, you made it! Showtime~!"],
+      ["Dr. Vale", "A reserved scholar who speaks with dry precision.", "You are punctual. A promising start."],
+    ]) {
+      const card = { ...CHARACTER, name, personality, first_mes: `${name} greets the user.`,
+        mes_example: `<START>\n{{user}}: Are you ready?\n{{char}}: ${reply}` };
+      const messages = assembleMessages(card, "Can you see this?", fixture().capture);
+      const system = String(messages[0].content);
+      expect(system).toContain(`You are ${name},`);
+      expect(system).toContain(`Personality:\n${personality}`);
+      expect(system.indexOf("Character description:")).toBeLessThan(system.indexOf("Responding to a shared screen:"));
+      expect(messages.slice(1, -1)).toEqual([
+        { role: "user", content: "Are you ready?" }, { role: "assistant", content: reply },
+      ]);
+      expect(messages.at(-1)!.content).toEqual([
+        { type: "text", text: "Can you see this?" }, { type: "desktop_capture", asset_id: "private-asset-a" },
+      ]);
+      expect(system).toContain("Stay in character even for a factual question or a simple yes/no answer");
+    }
+  });
+
+  test("uses the selected greeting when examples are absent and never invents a character voice", () => {
+    const card = { ...CHARACTER, name: "Aster", first_mes: "Well met, traveler.", mes_example: "" };
+    expect(assembleMessages(card, "", fixture().capture).slice(1, -1)).toEqual([
+      { role: "user", content: "Greet me in your own voice." }, { role: "assistant", content: "Well met, traveler." },
+    ]);
+    expect(assembleMessages({ ...card, first_mes: "" }, "", fixture().capture)).toHaveLength(2);
+  });
+
+  test("bounds example pairs and discards incomplete dialogue before the real user request", () => {
+    const card = { ...CHARACTER, mes_example: Array.from({ length: 10 }, (_, i) =>
+      `<START>\n{{user}}: Example ${i}\n{{char}}: Answer ${i}`).join("\n") + "\n<START>\n{{user}}: Unanswered example" };
+    const messages = assembleMessages(card, "The real question", fixture().capture);
+    expect(messages.slice(1, -1)).toHaveLength(6);
+    expect(messages.at(-1)!.content).toEqual([
+      { type: "text", text: "The real question" }, { type: "desktop_capture", asset_id: "private-asset-a" },
+    ]);
+    expect(JSON.stringify(messages.slice(1))).not.toContain("Unanswered example");
+  });
+
   test("defaults to a brief, conversational reaction shaped by the character card", () => {
     const messages = assembleMessages(CHARACTER, "", fixture().capture);
     const system = String(messages[0].content);
@@ -12,7 +53,7 @@ describe("character-driven companion prompt", () => {
     expect(system).toContain("not as a generic assistant or a screen-analysis report");
     expect(system).toContain("vocabulary, rhythm, humor, emotional tone, and point of view");
     expect(system).toContain("Do not force cheerfulness or a tone that conflicts with the character");
-    expect(messages[1].content).toEqual([
+    expect(messages.at(-1)!.content).toEqual([
       { type: "text", text: DEFAULT_REACTION_PROMPT }, { type: "desktop_capture", asset_id: "private-asset-a" },
     ]);
     for (const [label, value] of [["Character description", CHARACTER.description], ["Personality", CHARACTER.personality],
@@ -24,7 +65,7 @@ describe("character-driven companion prompt", () => {
 
   test("preserves a specific question instead of replacing it with the default reaction", () => {
     const messages = assembleMessages(CHARACTER, "  What changed in the clip?  ", { ...fixture().capture, kind: "video" });
-    expect(messages[1].content).toEqual([
+    expect(messages.at(-1)!.content).toEqual([
       { type: "text", text: "What changed in the clip?" }, { type: "desktop_capture", asset_id: "private-asset-a" },
     ]);
     expect(String(messages[0].content)).toContain("movement and changes across the approved clip");
@@ -52,6 +93,6 @@ describe("character-driven companion prompt", () => {
     expect(system).toContain("Personality:\nKoko speaks with dry humor.");
     expect(system).toContain("Both are the user's own question or direction");
     expect(system).not.toMatch(/\{\{(?:char|user)\}\}/i);
-    expect(messages[1].content).toEqual([{ type: "text", text: question }, { type: "desktop_capture", asset_id: "private-asset-a" }]);
+    expect(messages.at(-1)!.content).toEqual([{ type: "text", text: question }, { type: "desktop_capture", asset_id: "private-asset-a" }]);
   });
 });

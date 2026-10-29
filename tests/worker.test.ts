@@ -90,31 +90,37 @@ describe("Desk Companion worker", () => {
     } finally { dispose(); }
   });
 
-  test("binds a Gemini 3.8 video request to its explicitly approved provider and model", async () => {
-    const host = fixture(); host.connection.model = "gemini-3.8-flash";
-    const dispose = installCompanion(host.api);
-    try {
-      host.emit(host.message("video-a", { kind: "video", durationSeconds: 3 })); await settle();
-      expect(host.generations).toHaveLength(1);
-      expect(host.generations[0]).toMatchObject({ type: "raw", provider: "google", model: "gemini-3.8-flash",
-        connection_id: "model-a", parameters: { max_tokens: 4096 },
-        reasoning: { source: "custom", effort: "low", thinkingDisplay: "omitted" } });
-      expect(host.generations[0].messages[1].content[1]).toEqual({ type: "desktop_capture", asset_id: "private-asset-a" });
-      expect(host.sent.at(-1)?.payload.type).toBe("complete");
-      expect(host.released).toHaveLength(1);
-      expect(JSON.stringify(host.sent)).not.toContain("private-asset-a");
-    } finally { dispose(); }
+  test("binds Gemini and Z.ai video requests to their explicitly approved provider and model", async () => {
+    for (const [provider, model] of [["google", "gemini-3.8-flash"], ["zai", "glm-5.3-flash"]]) {
+      const host = fixture(); host.connection.provider = provider; host.connection.model = model;
+      const dispose = installCompanion(host.api);
+      try {
+        host.emit(host.message("video-a", { kind: "video", durationSeconds: 3 })); await settle();
+        expect(host.generations).toHaveLength(1);
+        expect(host.requests[0]).toMatchObject({ kind: "video", connectionId: "model-a", mode: "record" });
+        expect(host.generations[0]).toMatchObject({ type: "raw", provider, model,
+          connection_id: "model-a", reasoning: { source: "inherit" } });
+        expect(host.generations[0].parameters).toBeUndefined();
+        expect(host.generations[0].messages.at(-1)!.content[1]).toEqual({ type: "desktop_capture", asset_id: "private-asset-a" });
+        expect(host.sent.at(-1)?.payload.type).toBe("complete");
+        expect(host.released).toHaveLength(1);
+        expect(JSON.stringify(host.sent)).not.toContain("private-asset-a");
+      } finally { dispose(); }
+    }
   });
 
-  test("preserves the small reply budget and reasoning-off policy on non-Gemini routes", async () => {
-    const host = fixture(); host.connection.provider = "openai"; host.connection.model = "vision-model";
-    const dispose = installCompanion(host.api);
-    try {
-      host.emit(host.message()); await settle();
-      expect(host.generations[0]).toMatchObject({ provider: "openai", model: "vision-model",
-        parameters: { max_tokens: 512 }, reasoning: { source: "off" } });
-      expect(host.sent.at(-1)?.payload.type).toBe("complete");
-    } finally { dispose(); }
+  test("inherits reasoning for every provider without forcing thinking or a token budget", async () => {
+    for (const [provider, model] of [["openai", "vision-model"], ["google", "gemini-3.8-flash"],
+      ["google_vertex", "gemini-2.5-flash"], ["zai", "glm-5.3-flash"], ["anthropic", "claude-sonnet-4-6"]]) {
+      const host = fixture(); host.connection.provider = provider; host.connection.model = model;
+      const dispose = installCompanion(host.api);
+      try {
+        host.emit(host.message()); await settle();
+        expect(host.generations[0]).toMatchObject({ provider, model, reasoning: { source: "inherit" } });
+        expect(host.generations[0].parameters).toBeUndefined();
+        expect(host.sent.at(-1)?.payload.type).toBe("complete");
+      } finally { dispose(); }
+    }
   });
 
   test("reports known host/provider failures without echoing payloads or retrying a capture", async () => {
@@ -177,7 +183,7 @@ describe("Desk Companion worker", () => {
       host.emit(host.message("request-a", { question: " \n " })); await settle();
       expect(host.requests).toHaveLength(1); expect(host.generations).toHaveLength(1);
       expect(host.requests[0].purpose).toContain("react naturally as Mira");
-      expect(host.generations[0].messages[1].content).toEqual([
+      expect(host.generations[0].messages.at(-1)!.content).toEqual([
         { type: "text", text: DEFAULT_REACTION_PROMPT }, { type: "desktop_capture", asset_id: "private-asset-a" },
       ]);
       expect(host.released).toHaveLength(1);
@@ -191,10 +197,10 @@ describe("Desk Companion worker", () => {
       expect(host.requests[0].userId).toBe("user-a");
       const generation = host.generations[0];
       expect(generation.type).toBe("raw"); expect(generation.connection_id).toBe("model-a"); expect(generation.userId).toBe("user-a");
-      expect(generation.tools).toEqual([]); expect(generation.reasoning).toEqual({ source: "off" });
+      expect(generation.tools).toEqual([]); expect(generation.reasoning).toEqual({ source: "inherit" });
       expect(generation.messages[0].content).toContain("Mira");
       expect(generation.messages[0].content).toContain("Warm and observant");
-      expect(generation.messages[1].content).toEqual([{ type: "text", text: "What do you notice?" }, { type: "desktop_capture", asset_id: "private-asset-a" }]);
+      expect(generation.messages.at(-1)!.content).toEqual([{ type: "text", text: "What do you notice?" }, { type: "desktop_capture", asset_id: "private-asset-a" }]);
       expect(host.released).toEqual([{ assetId: "private-asset-a", userId: "user-a" }]);
       expect(host.sent.every((entry) => entry.userId === "user-a" && entry.options?.frontendSessionId === "session-a")).toBe(true);
       const frontend = JSON.stringify(host.sent);

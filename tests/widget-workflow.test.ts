@@ -569,7 +569,7 @@ describe("configured widget share pipeline", () => {
       expect(screen.recognitions[0].options.provider).toBe("whistle");
       expect(screen.host.requests[0].durationSeconds).toBe(10);
       await screen.approve();
-      expect(screen.host.generations[0].messages[1].content[0].text).toContain("What catches your eye?");
+      expect(screen.host.generations[0].messages.at(-1)!.content[0].text).toContain("What catches your eye?");
       expect(field("Capture type").options.disabled).toBe(false);
       screen.settings.dispose();
       expect(screen.components.filter(component => screen.settings.panel.contains(component.target))).toHaveLength(0);
@@ -609,7 +609,7 @@ describe("configured widget share pipeline", () => {
       await screen.host.invoke(); await settle(); expect(screen.recognitions).toHaveLength(1);
       silence.resolve(); await settle();
       expect(screen.host.requests).toHaveLength(1); await screen.approve();
-      expect(screen.host.generations[0].messages[1].content[0].text).toBe("What do you think?");
+      expect(screen.host.generations[0].messages.at(-1)!.content[0].text).toBe("What do you think?");
       expect(screen.requests).toHaveLength(0);
     } finally { silence.resolve(); await screen.close(); }
   });
@@ -667,7 +667,7 @@ describe("configured widget share pipeline", () => {
       expect(screen.element("status").textContent).toContain("Loading Whistle");
       await screen.host.invoke(); await settle(); expect(screen.recognitions).toHaveLength(1);
       transcript.resolve(Response.json({ text: "What changed?" })); await settle(); await screen.approve();
-      expect(screen.host.generations[0].messages[1].content[0].text).toBe("Look at this page.\n\nWhat changed?");
+      expect(screen.host.generations[0].messages.at(-1)!.content[0].text).toBe("Look at this page.\n\nWhat changed?");
       expect(screen.host.generations[0].messages[0].content).toContain(CHARACTER.description);
       expect(screen.host.generations[0].messages[0].content).toContain(CHARACTER.personality);
       expect(screen.host.generations[0].messages[0].content).toContain(`You are ${CHARACTER.name},`);
@@ -727,7 +727,7 @@ describe("configured widget share pipeline", () => {
       expect(screen.host.requests).toHaveLength(1);
       await screen.approve();
       expect(screen.host.generations).toHaveLength(1);
-      expect(screen.host.generations[0].messages[1].content[0].text).toBe("What changed?");
+      expect(screen.host.generations[0].messages.at(-1)!.content[0].text).toBe("What changed?");
       expect(screen.speechCalls).toHaveLength(1);
     } finally { transcript.resolve(Response.json({ text: "late" })); await screen.close(); }
   });
@@ -741,7 +741,7 @@ describe("configured widget share pipeline", () => {
       await screen.host.invoke("share-screen-without-voice"); await settle();
       expect(screen.microphoneRequests()).toBe(0); expect(screen.recognitions).toHaveLength(0);
       expect(screen.host.requests).toHaveLength(1); await screen.approve();
-      expect(screen.host.generations[0].messages[1].content[0].text).toBe("Check this calendar");
+      expect(screen.host.generations[0].messages.at(-1)!.content[0].text).toBe("Check this calendar");
       expect(screen.element<HTMLInputElement>("voice-input").checked).toBe(true);
       expect(screen.speechCalls).toHaveLength(1);
     } finally { await screen.close(); }
@@ -1089,7 +1089,7 @@ describe("configured widget share pipeline", () => {
       expect(screen.element<HTMLInputElement>("auto-speak").disabled).toBe(true);
       await screen.approve();
       expect(screen.host.generations).toHaveLength(1);
-      expect(screen.host.generations[0].messages[1].content[0].text).toBe("What do you think?");
+      expect(screen.host.generations[0].messages.at(-1)!.content[0].text).toBe("What do you think?");
       expect(screen.speechCalls).toHaveLength(1); expect(screen.playback()).toBe(1);
       expect(screen.speechCalls[0]).toMatchObject({ input: { text: "You have a calendar open." }, options: { connectionId: "voice-a" } });
       screen.message(screen.host.sent.find((entry) => entry.payload.type === "complete")?.payload); await settle();

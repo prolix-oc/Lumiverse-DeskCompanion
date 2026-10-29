@@ -1,4 +1,4 @@
-import type { CapturedMediaRef, CharacterDTO, GenerationReasoningOverrideDTO, GenerationRequestDTO, SpindleAPI } from "lumiverse-spindle-types";
+import type { CapturedMediaRef, CharacterDTO, GenerationRequestDTO, SpindleAPI } from "lumiverse-spindle-types";
 import { assembleMessages } from "./prompt";
 import { captureTargets } from "./capture-targets";
 import { CHANNEL, CHARACTER_PAGE_SIZE, DeskError, ERROR_MESSAGES, MAX_REPLY, characterVoice, mediaSupport, parseClientMessage, record, safeLabel } from "./protocol";
@@ -178,15 +178,11 @@ export function installCompanion(api: SpindleAPI, options: { now?: () => number;
       let text = "";
       let terminal = false;
       let lastSent = 0;
-      const gemini = connection.provider === "google" || connection.provider === "google_vertex";
-      const gemini3 = gemini && /(?:^|[/:])gemini-3(?:[.-]|$)/i.test(connection.model);
-      const reasoning: GenerationReasoningOverrideDTO = gemini3
-        ? { source: "custom", effort: "low", thinkingDisplay: "omitted" } : { source: "off" };
       const generationRequest: GenerationRequestDTO & { type: "raw"; provider: string; model: string } = {
         type: "raw", provider: connection.provider, model: connection.model,
         connection_id: connection.id, userId: route.userId,
-        messages: assembleMessages(character, message.question, run.capture), parameters: { max_tokens: gemini ? 4096 : 512 },
-        tools: [], reasoning, signal: run.controller.signal,
+        messages: assembleMessages(character, message.question, run.capture),
+        tools: [], reasoning: { source: "inherit" }, signal: run.controller.signal,
       };
       try {
         for await (const chunk of api.generate.rawStream(generationRequest)) {

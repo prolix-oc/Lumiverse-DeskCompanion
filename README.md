@@ -23,7 +23,7 @@ The build emits `dist/backend.js`, `dist/frontend.js`, and a minified `dist/widg
 4. Use **Set Up Screen Capture** in the extension's permissions area, or **Browser → Enable Extension Screen Capture…** in the desktop tray. Sign in through native OAuth for the same account that owns the model connection. Desktop remembers transport setup and reconnects for that instance; a browser cookie alone does not enable capture.
 5. Configure an image-capable model connection and an optional TTS connection in Lumiverse's normal Connection/Voice settings. The demo stores no API keys and creates no connections.
 6. In the **Desk Companion → Companion** tab, choose a character, model connection, and display. Leave the question blank for a natural reaction, or add a direction. Wait for **Saved**, then click **Look at my screen** in the widget. Named Windows displays start capture directly with the existing permissions. Native picker sources require source selection on first use and remember that choice for matching requests. The widget advances through listening/transcribing when enabled, capturing, and thinking without an extra Share click.
-7. For video, select **Video clip**, 1–30 seconds, a video-capable desktop, and a Gemini connection (`google`, or a Gemini route through `google_vertex`). Provider hints are not proof that an arbitrary model supports media. The host and model still enforce actual support. Windows encoding is hardware-preferred; macOS is hardware-required.
+7. For video, select **Video clip**, 1–30 seconds, a video-capable desktop, and a Gemini connection (`google`, or a Gemini route through `google_vertex`) or a Z.ai GLM-5.3-Flash/FlashX connection. Z.ai uses inline MP4 video content, without publishing a recording URL. Both the updated backend and extension are required. Text-only GLM models remain unsupported. Windows encoding is hardware-preferred; macOS is hardware-required.
 8. To use a system floating pop-out, use the host's widget pop-out control or Desktop's **Floating Widgets** tray menu. The host loads `setupWidget(ctx, target)` from `dist/widget.js`; the extension registers the same single widget at index 0. No `window.open` or Tauri IPC is used.
 9. In the **Speech** tab, choose a voice connection under **Spoken replies**. **Use character's voice** selects an accessible connection referenced by `character.extensions.ttsVoice`. Spindle speaks with that connection's default voice and the host's Voice & Speech playback settings; extension-specific voice/speed overrides are not supported by this API. Enable TTS in Lumiverse's Voice & Speech settings. Enable the **Spoken replies** switch, or leave it off and use **Speak reply** manually. Playback and audio controls belong to Lumiverse.
 10. In **Speech**, optionally enable **Voice input**, select **Whistle (on this device)**, **STT connection**, or **Web Speech** when available, and speak naturally. Whistle needs no saved connection; the connection provider requires an accessible STT profile. The same main action starts `ctx.stt.start({ continuous: false })`. Spindle finishes after confirmed speech followed by silence, returns the final transcript, and the extension combines it with any typed direction before requesting screen capture. Cancel discards the input; there is no fixed listening duration. No separate Record, Transcribe, Generate, or Speak buttons are required for the configured sequence.
@@ -45,7 +45,7 @@ Keep Desktop's integrated browser open and signed in. Global bindings may work w
 
 ## Default companion voice
 
-The worker fetches the full selected character card for the authenticated user. The system prompt identifies the model directly as that character and includes labeled description/background, personality, scenario, greeting, dialogue examples, and portrayal instructions, with `{{char}}` and `{{user}}` references expanded. It asks for a spontaneous, in-character reaction to one or two things that stand out. Responses normally target 1–3 short sentences (20–60 words), with more detail only when requested. The card shapes phrasing, rhythm, humor, and emotional tone; the prompt does not force a generic cheerful assistant voice. These are model instructions, not a guaranteed word-count limit.
+The worker fetches the full selected character card for the authenticated user. The system prompt puts its description/background, personality, scenario, greeting, dialogue examples, and portrayal instructions before the screen-sharing guidance, with `{{char}}` and `{{user}}` references expanded. Complete character-card dialogue pairs become bounded example user/assistant turns; when pairs are absent, the selected greeting supplies a voice example. These are style references, separate from the final user question and capture. No character name, emotion, or speaking style is hardcoded. Responses normally target 1–3 short sentences (20–60 words), with more detail when requested. These are model instructions, not a guaranteed word-count limit.
 
 An optional question overrides the default reaction request without removing the character context. Typed directions and the complete speech transcript are combined into the user message beside the capture; the prompt treats both as the user's request. For video-capable routes, the character is prompted to consider visible motion and changes across the approved clip. They are not told they have continuous live awareness. Plain-text output remains suitable for optional TTS; speech is automatic only when explicitly enabled for sharing.
 
@@ -96,13 +96,12 @@ request that does not exactly match the approved model and connection, before
 any pixels reach the provider. The extension now supplies both fields from the
 owned connection fetched for the share; the host's destination checks are unchanged.
 
-Gemini requests allow a 4,096-token generation budget, including internal reasoning,
-while visible replies remain bounded to 4,000 characters and the default prompt
-still asks for a concise reaction. Gemini 3 requests use low thinking effort without
-displaying thoughts; other routes retain the reasoning-off override. A short text
-target is not the same as a thinking-inclusive token budget. This reduces empty
-responses caused by consuming a small output budget on reasoning, but does not
-guarantee completion for every provider request.
+All providers use `reasoning: { source: "inherit" }`: the backend applies the selected
+connection's bound reasoning settings, falling back to the user's global reasoning
+settings when unbound. The extension does not force thinking off, choose an effort,
+or impose a model-specific token budget. Visible replies remain bounded to 4,000
+characters, and the prompt asks for a concise reaction. Thoughts are not rendered
+as the character's spoken reply.
 
 Failures distinguish a changed capture destination, credential/access denial,
 quota limits, invalid provider requests, service failures, token-budget exhaustion,
@@ -152,7 +151,7 @@ Speech uses the frontend consumer APIs; engine-registration APIs are not consume
 - Cancel while waiting for native consent, then discard there; repeat while streaming generation and while synthesizing speech. Close the native source, lock/sleep the desktop, disable native capture, switch instances, revoke grants, and unload the extension. Confirm no delayed model dispatch or speaking.
 - Try unsupported models/devices, expired handles, missing character/connection, repeated clicks, oversized replies/audio, provider failures, and autoplay blocking. Render model output such as `<script>` as plain text, never executable markup.
 - Test both speech options off/on and the complete one-action flow. Verify no microphone request on widget load, timely track shutdown, cancellation during a pending OS microphone prompt and STT upload, no capture after failed STT, and exactly one TTS request after a completed reaction with one-shot or remembered approval. Check typed-input fallback in each native webview; OS microphone configuration/consent and autoplay are not bypassed.
-- Inspect persistence/logs: no extension-written capture files or transcripts, no chat-history writes, no capture-derived provider payload in request history. Check actual GPU encode activity on Windows rather than assuming the acceleration preference proves hardware use.
+- Inspect persistence/logs: no extension-written capture files or transcripts and no chat-history writes. When request history is enabled, verify character instructions, example turns, typed/transcribed input, and successful response text are inspectable, with captured media omitted and credentials redacted. Old omitted bodies cannot be recovered. Check actual GPU encode activity on Windows rather than assuming the acceleration preference proves hardware use.
 
 ## Layout
 

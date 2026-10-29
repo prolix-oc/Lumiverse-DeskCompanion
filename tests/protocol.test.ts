@@ -37,6 +37,15 @@ describe("request and character boundaries", () => {
     expect(mediaSupport("google_vertex", "claude-sonnet-4-6").video).toBe(false);
     expect(mediaSupport("openrouter", "google/gemini-2.5-flash").video).toBe(false);
   });
+  test("Z.ai vision support follows the documented Flash family, not every GLM model or route", () => {
+    for (const model of ["glm-5.3-flash", "glm-5.3-flashx", "glm-5.3-flashx-legal", "GLM-5.3-FLASH"]) {
+      expect(mediaSupport("zai", model)).toEqual({ image: true, video: true });
+    }
+    for (const model of ["glm-5.3", "glm-5.2", "glm-4.7", "glm-5.3-flash-fictional"]) {
+      expect(mediaSupport("zai", model)).toEqual({ image: false, video: false });
+    }
+    expect(mediaSupport("openai", "glm-5.3-flash").video).toBe(false);
+  });
   test("extracts only valid character voice settings", () => {
     expect(characterVoice({ ttsVoice: { connectionId: "voice-a", voice: "warm", parameters: { speed: 1.2, secret: "no" } } }))
       .toEqual({ connectionId: "voice-a", voice: "warm", speed: 1.2 });

@@ -110,7 +110,7 @@ export const ERROR_MESSAGES: Record<ErrorCode, string> = {
   CHARACTER_UNAVAILABLE: "The selected character is no longer available to this account.",
   CONNECTION_UNAVAILABLE: "The selected model connection is no longer available to this account.",
   DEVICE_UNAVAILABLE: "The selected desktop is offline. Reconnect it using Set Up Screen Capture in the extension's permissions or desktop tray. Updated desktops keep their saved identity; older clients may need their new registration selected in Settings.",
-  MEDIA_UNSUPPORTED: "Choose a capture-capable device and a model that accepts this media type. Video currently requires a Gemini route.",
+  MEDIA_UNSUPPORTED: "Choose a capture-capable device and a model that accepts this media type. Video supports Gemini routes and Z.ai GLM-5.3-Flash/FlashX.",
   PERMISSION_REQUIRED: "Grant Characters, Generation, and the matching capture permission in Extensions. Capture grants require administrator/owner approval.",
   CAPTURE_FAILED: "The capture was declined, expired, or could not be prepared. Nothing was sent to a model. If you used Stop & Discard, use Allow Screen Capture Requests Again in the desktop tray before sharing again.",
   CANCELLED: "Observation cancelled. If the native capture panel is still open, use its Stop & Discard control.",
@@ -202,6 +202,7 @@ export function characterVoice(extensions: unknown): VoiceRef | null {
 }
 
 export function mediaSupport(provider: string, model: string): { image: boolean; video: boolean } {
+  if (provider === "zai" && /^glm-5\.3-flash(?:x(?:-legal)?)?$/i.test(model)) return { image: true, video: true };
   const image = ["google", "google_vertex", "openai", "anthropic", "openrouter"].includes(provider);
   const video = provider === "google" || (provider === "google_vertex" && /(?:^|\/)gemini[-/]/i.test(model));
   return { image, video };
