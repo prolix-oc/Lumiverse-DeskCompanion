@@ -392,6 +392,7 @@ function mountSharedSections(ctx, root) {
 }
 
 // src/companion-view.ts
+var SETTINGS_DEBOUNCE_MS = 300;
 function mountView(ctx, root, options = {}) {
   const surface = options.surface ?? "widget";
   const clientId = createMessageId();
@@ -750,7 +751,7 @@ function mountView(ctx, root, options = {}) {
     updateControls();
   }
   function flushSettings() {
-    if (disposed || !snapshot || subscription || saving || !Object.keys(pendingPatch).length)
+    if (disposed || saveTimer !== null || !snapshot || subscription || saving || !Object.keys(pendingPatch).length)
       return;
     const patch = pendingPatch;
     pendingPatch = {};
@@ -769,13 +770,17 @@ function mountView(ctx, root, options = {}) {
   function queueSettings(patch) {
     if (surface !== "settings" || disposed || !snapshot || !parseSettingsPatch(patch))
       return;
-    pendingPatch = { ...pendingPatch, ...patch };
+    const current = settings();
+    const changed = Object.fromEntries(Object.entries(patch).filter(([key, value]) => current[key] !== value));
+    if (!Object.keys(changed).length)
+      return;
+    pendingPatch = { ...pendingPatch, ...changed };
     if (saveTimer !== null)
       window.clearTimeout(saveTimer);
     saveTimer = window.setTimeout(() => {
       saveTimer = null;
       flushSettings();
-    }, 100);
+    }, SETTINGS_DEBOUNCE_MS);
     updateControls();
   }
   function chooseDefaults() {
@@ -1139,10 +1144,6 @@ function mountView(ctx, root, options = {}) {
         resetCharacterRequest();
         if (devicesTimeout !== null)
           window.clearTimeout(devicesTimeout);
-        if (saveTimer !== null) {
-          window.clearTimeout(saveTimer);
-          saveTimer = null;
-        }
       }
       const oldCharacter = snapshot?.settings.characterId;
       snapshot = incoming;
@@ -1447,15 +1448,14 @@ function mountView(ctx, root, options = {}) {
     options.openSettings ? options.openSettings() : send({ type: "open-settings" });
   });
   listen(element("character-voice"), "click", () => applyCharacterVoice());
-  listen(character, "change", () => {
-    queueSettings({ characterId: character.value });
-    clearReply();
-    applyCharacterVoice();
-  });
   for (const { key, control } of settingsControls)
     listen(control, "input", () => {
       const value = key === "autoSpeak" || key === "voiceInput" ? control.checked : ["durationSeconds"].includes(key) ? Number(control.value) : control.value;
       queueSettings({ [key]: value });
+      if (key === "characterId") {
+        clearReply();
+        applyCharacterVoice();
+      }
       updateControls();
     });
   listen(element("grant"), "click", () => {
@@ -1579,8 +1579,6 @@ function mountView(ctx, root, options = {}) {
       return;
     disposing = true;
     cancel(false);
-    if (surface === "settings")
-      flushSettings();
     send({ type: "unsubscribe" });
     disposed = true;
     listingController.abort();

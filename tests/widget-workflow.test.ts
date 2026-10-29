@@ -147,24 +147,25 @@ async function widget(options: { stt?: Promise<Response>; silence?: Promise<void
   } as unknown as SpindleFrontendContext; }
   const settings = mountView(context("session-a"), dom.window.document.querySelector("main")!, { surface: "settings" });
   const view = mountView(context("session-b"), dom.window.document.querySelector("main")!);
-  await settle();
-  await new Promise((resolve) => setTimeout(resolve, 140)); await settle();
   const element = <ElementType extends HTMLElement>(role: string) => (view.panel.querySelector<ElementType>(`[data-role="${role}"]`)
     ?? settings.panel.querySelector<ElementType>(`[data-role="${role}"]`))!;
-  const synchronize = async () => { await new Promise((resolve) => setTimeout(resolve, 140)); await settle(); };
-  const enable = async (role: string) => {
-    const control = element<HTMLInputElement>(role); control.checked = true; control.dispatchEvent(new dom.window.Event("input")); await synchronize();
-  };
   const runTimers = async (delay: number) => {
     for (const [id, timer] of [...timers]) if (timer.delay === delay) {
       dom.window.clearTimeout(id); timer.callback();
     }
     await settle();
   };
+  const synchronize = () => runTimers(300);
+  const enable = async (role: string) => {
+    const control = element<HTMLInputElement>(role); control.checked = true; control.dispatchEvent(new dom.window.Event("input")); await synchronize();
+  };
+  await settle(); await synchronize();
   return { host, view, settings, context, dom, outgoing, events, element, enable, synchronize, requests, editors, components, recognitions, speechCalls, isSpeaking: () => speaking,
     setDevices: (value: typeof devices) => { devices = value; },
     advanceClock: () => { clock += 10001; },
     discover: () => runTimers(10000),
+    debounceSettings: synchronize,
+    settingsTimers: () => [...timers].filter(([, timer]) => timer.delay === 300).map(([id]) => id),
     expireDiscovery: () => runTimers(8000),
     search: (query: string) => { components.find(c => c.options.ariaLabel === "Character")!.options.onSearchChange(query); return runTimers(200); },
     expireApproval: () => runTimers(12000),
@@ -184,6 +185,85 @@ async function widget(options: { stt?: Promise<Response>; silence?: Promise<void
 }
 
 describe("configured widget share pipeline", () => {
+  test("settings input restarts the debounce and discovery cannot save early or repeatedly", async () => {
+    const screen = await widget();
+    try {
+      const field = screen.components.find(c => c.options.ariaLabel === "Optional question or direction")!;
+      const saves = () => screen.outgoing.filter(message => message.type === "configure");
+      const count = saves().length;
+      field.options.onChange("First edit");
+      const firstTimer = screen.settingsTimers();
+      expect(firstTimer).toHaveLength(1);
+      field.options.onChange("Latest edit");
+      expect(screen.settingsTimers()).toHaveLength(1);
+      expect(screen.settingsTimers()).not.toEqual(firstTimer);
+      await screen.discover();
+      expect(saves()).toHaveLength(count);
+      expect(field.options.value).toBe("Latest edit");
+      await screen.debounceSettings();
+      expect(saves()).toHaveLength(count + 1);
+      expect(saves().at(-1).patch).toEqual({ question: "Latest edit" });
+      await screen.discover(); await screen.discover();
+      expect(saves()).toHaveLength(count + 1);
+    } finally { await screen.close(); }
+  });
+
+  test("acknowledging an earlier save does not flush newer input before its debounce", async () => {
+    const screen = await widget();
+    const saved = screen.host.mutable.userStorage.setJson;
+    const acknowledgement = deferred<void>();
+    let blocked = true;
+    screen.host.mutable.userStorage.setJson = async (...args) => {
+      if (blocked) { blocked = false; await acknowledgement.promise; }
+      await saved(...args);
+    };
+    try {
+      const field = screen.components.find(c => c.options.ariaLabel === "Optional question or direction")!;
+      const saves = () => screen.outgoing.filter(message => message.type === "configure");
+      const count = saves().length;
+      field.options.onChange("First save"); await screen.debounceSettings();
+      expect(saves()).toHaveLength(count + 1);
+      field.options.onChange("Still typing");
+      acknowledgement.resolve(); await settle();
+      expect(saves()).toHaveLength(count + 1);
+      field.options.onChange("Finished typing"); await screen.debounceSettings();
+      expect(saves()).toHaveLength(count + 2);
+      expect(saves().at(-1).patch).toEqual({ question: "Finished typing" });
+    } finally { acknowledgement.resolve(); screen.host.mutable.userStorage.setJson = saved; await screen.close(); }
+  });
+
+  test("shared controls repeating the same value on blur do not save again", async () => {
+    const screen = await widget();
+    try {
+      const field = screen.components.find(c => c.options.ariaLabel === "Clip duration")!;
+      screen.components.find(c => c.options.ariaLabel === "Capture type")!.options.onChange("video");
+      field.options.onChange(10); await screen.debounceSettings();
+      const count = screen.outgoing.filter(message => message.type === "configure").length;
+      field.options.onChange(10);
+      expect(screen.settingsTimers()).toHaveLength(0);
+      expect(screen.settings.panel.querySelector('[data-role="sync-status"]')!.textContent).toBe("Saved");
+      await screen.debounceSettings(); await screen.discover();
+      expect(screen.outgoing.filter(message => message.type === "configure")).toHaveLength(count);
+    } finally { await screen.close(); }
+  });
+
+  test("native change, blur, and closing settings cannot bypass the input debounce", async () => {
+    const screen = await widget({ sharedControls: false });
+    try {
+      const question = screen.element<HTMLTextAreaElement>("question");
+      const count = screen.outgoing.filter(message => message.type === "configure").length;
+      question.value = "Only input should schedule a save";
+      question.dispatchEvent(new screen.dom.window.Event("change"));
+      question.dispatchEvent(new screen.dom.window.Event("blur"));
+      expect(screen.settingsTimers()).toHaveLength(0);
+      question.dispatchEvent(new screen.dom.window.Event("input"));
+      question.dispatchEvent(new screen.dom.window.Event("blur"));
+      expect(screen.outgoing.filter(message => message.type === "configure")).toHaveLength(count);
+      screen.settings.dispose(); await screen.debounceSettings();
+      expect(screen.outgoing.filter(message => message.type === "configure")).toHaveLength(count);
+    } finally { await screen.close(); }
+  });
+
   test("recovers a settings subscription lost during setup without losing visible choices", async () => {
     const screen = await widget({ dropInitialSubscription: true });
     try {

@@ -67,6 +67,8 @@ Configuration persists per account and synchronizes with reopened widgets. Micro
 
 All service access routes through Spindle. `ctx.connections.list({ kind: 'tts' | 'stt' })` discovers credential-free speech profiles, `ctx.stt` handles transcription, and `ctx.tts` handles playback. There are no direct HTTP/REST requests or REST fallbacks in extension code. Speech needs the corresponding `speech-to-text-v1`, `text-to-speech-v1`, and `connection-kinds-v1` capabilities and the `media` grant. Older hosts show update guidance while text-only sharing continues. Existing saved settings migrate to the connection provider; voice input and automatic speech remain opt-in.
 
+Version 0.1.9 saves settings edits after 300 ms without further input. Blur callbacks with unchanged values do not schedule writes, and discovery, state updates, acknowledgements, and closing the panel cannot bypass the debounce. Connection recovery retains pending edits and respects their debounce.
+
 Version 0.1.8 restores the panel subscription after a connection drop, retains pending settings edits while reconnecting, and recovers missing save acknowledgements. Refresh reconnects settings as well as resource discovery. Recovery never replays microphone input, capture, or generation.
 
 Version 0.1.7 adds the shared character picker with thumbnails, full-library search, and scroll loading. It requires the accompanying frontend/backend picker support for these features; older hosts preload pages for local selection. Uses the published `lumiverse-spindle-types` 0.6.71 contract.

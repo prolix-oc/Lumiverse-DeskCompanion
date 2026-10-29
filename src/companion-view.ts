@@ -12,6 +12,8 @@ import type { CompanionSettings, CompanionSnapshot } from "./settings";
 import { QUICK_SHARE_COMMAND, SHARE_COMMAND } from "./shortcuts";
 import { mountSharedBadge, mountSharedFields, mountSharedSections } from "./shared-ui";
 
+const SETTINGS_DEBOUNCE_MS = 300;
+
 export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, options: { surface?: "widget" | "settings"; openSettings?: () => void } = {}): { panel: HTMLElement; dispose: () => void } {
   const surface = options.surface ?? "widget";
   const clientId = createMessageId();
@@ -315,7 +317,9 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
   }
 
   function flushSettings(): void {
-    if (disposed || !snapshot || subscription || saving || !Object.keys(pendingPatch).length) return;
+    // State broadcasts and save acknowledgements may unblock a pending save,
+    // but must never shorten the debounce for the latest input.
+    if (disposed || saveTimer !== null || !snapshot || subscription || saving || !Object.keys(pendingPatch).length) return;
     const patch = pendingPatch; pendingPatch = {};
     const id = createMessageId(); saving = { id, patch };
     saveTimeout = window.setTimeout(() => {
@@ -328,9 +332,13 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
 
   function queueSettings(patch: Partial<CompanionSettings>): void {
     if (surface !== "settings" || disposed || !snapshot || !parseSettingsPatch(patch)) return;
-    pendingPatch = { ...pendingPatch, ...patch };
+    const current = settings();
+    const changed = Object.fromEntries(Object.entries(patch).filter(([key, value]) => current[key as keyof CompanionSettings] !== value));
+    // Shared numeric controls can emit their current value again on blur.
+    if (!Object.keys(changed).length) return;
+    pendingPatch = { ...pendingPatch, ...changed };
     if (saveTimer !== null) window.clearTimeout(saveTimer);
-    saveTimer = window.setTimeout(() => { saveTimer = null; flushSettings(); }, 100);
+    saveTimer = window.setTimeout(() => { saveTimer = null; flushSettings(); }, SETTINGS_DEBOUNCE_MS);
     updateControls();
   }
 
@@ -638,7 +646,6 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
         if (searchTimer !== null) window.clearTimeout(searchTimer);
         searchTimer = null; resetCharacterRequest();
         if (devicesTimeout !== null) window.clearTimeout(devicesTimeout);
-        if (saveTimer !== null) { window.clearTimeout(saveTimer); saveTimer = null; }
       }
       const oldCharacter = snapshot?.settings.characterId;
       snapshot = incoming;
@@ -827,11 +834,12 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
   listen(element("stop-speech"), "click", () => { automaticSpeech.cancel(); stopSpeech(); send({ type: "stop-speech" }); element("speech-status").textContent = "Speech stopped; pending automatic speech is disabled for this share."; });
   listen(element("settings"), "click", () => { options.openSettings ? options.openSettings() : send({ type: "open-settings" }); });
   listen(element("character-voice"), "click", () => applyCharacterVoice());
-  listen(character, "change", () => { queueSettings({ characterId: character.value }); clearReply(); applyCharacterVoice(); });
   for (const { key, control } of settingsControls) listen(control, "input", () => {
     const value = key === "autoSpeak" || key === "voiceInput" ? (control as HTMLInputElement).checked
       : ["durationSeconds"].includes(key) ? Number(control.value) : control.value;
-    queueSettings({ [key]: value }); updateControls();
+    queueSettings({ [key]: value });
+    if (key === "characterId") { clearReply(); applyCharacterVoice(); }
+    updateControls();
   });
   listen(element("grant"), "click", () => {
     void ctx.permissions.request([...REQUIRED_PERMISSIONS, "screen_recording", "media"], { reason: "Desk Companion uses Media for optional voice input and playback, plus grants to select a character, request desktop capture with native approval, and ask your chosen model." })
@@ -888,7 +896,6 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     if (disposed || disposing) return;
     disposing = true;
     cancel(false);
-    if (surface === "settings") flushSettings();
     send({ type: "unsubscribe" });
     disposed = true; listingController.abort(); stopSpeech();
     pendingBegin?.reject(new Error("Companion window closed.")); pendingBegin = null;
