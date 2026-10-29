@@ -10,10 +10,11 @@ export function setup(ctx: SpindleFrontendContext): () => void {
     description: "Configure your permissioned desktop companion", keywords: ["desktop", "capture", "character", "voice", "popout", "settings", "configuration"] });
   const about = document.createElement("section");
   about.className = "dc-about";
-  about.innerHTML = `<h2>A character beside your desktop</h2><p>Configure your character, model, desktop, and optional speech here. Settings synchronize with every companion widget, including native pop-outs. The widget is reserved for sharing, cancelling, and replies. No background monitoring, computer control, or chat-history writes.</p>
-    <ol><li>Grant UI Panels, Characters, Generation, and the capture permissions.</li><li>Enable Extension Screen Capture in Lumiverse Desktop's Browser tray menu, and sign in natively.</li><li>Choose your character, model, and desktop. Configure Share workflow for optional timed voice input and automatic speech.</li><li>Start one share, select the screen in the trusted picker, preview, and approve it. The character reacts and, when configured, speaks without a separate generation or TTS button.</li></ol>
+  about.innerHTML = `<h2>A character beside your desktop</h2><p>Choose your character, model, desktop, and optional speech once. Then use Look at my screen or a desktop keyboard shortcut whenever you want a reaction. Configure shortcuts below, including an option to skip voice input. Your settings follow you into native pop-outs.</p>
+    <details><summary>First-time setup &amp; desktop controls</summary>
+    <ol><li>Grant UI Panels, Characters, Generation, and the capture permissions.</li><li>Use Set Up Screen Capture in the extension's permissions, or Enable Extension Screen Capture in Lumiverse Desktop's Browser tray menu. Sign in natively for the same account.</li><li>Choose your character, model, and desktop below. Connected desktops appear automatically. Configure Share workflow for optional timed voice input and automatic speech.</li><li>On the first share, choose a source in Desktop. Enable Remember this source and approval for this extension to reuse it on later matching shares. Review Before Sending is optional. Your character reacts and, when configured, speaks.</li></ol>
     <p>To make a system floating pop-out, use the widget's host-provided desktop pop-out control or the desktop tray's Floating Widgets menu. The extension does not create its own browser windows or call native capture IPC.</p>
-    <p>Video currently requires a Gemini-compatible route. Linux capture and rolling replay buffers are not available yet. Cancelling a worker request does not dismiss a pending native picker: use its Stop &amp; Discard button.</p>
+    <p>Video currently requires a Gemini-compatible route. Linux capture and rolling replay buffers are not available yet. Use native Stop &amp; Discard to stop a pending capture; this also pauses future requests until Allow Screen Capture Requests Again in the desktop tray. Forget Screen Capture Approvals lets you choose a new source on your next share.</p></details>
     <div class="dc-row"><button data-role="permissions" type="button">Grant permissions</button><button data-role="show" type="button">Open companion widget</button></div><p data-role="status" role="status"></p>`;
   tab.root.append(about);
   const permissionButton = about.querySelector<HTMLButtonElement>('[data-role="permissions"]')!;
@@ -42,7 +43,7 @@ export function setup(ctx: SpindleFrontendContext): () => void {
   }
   const showHandler = () => { void show(); };
   const permissionHandler = () => {
-    void ctx.permissions.request([...REQUIRED_PERMISSIONS, "screen_recording"], { reason: "Enable an opt-in character desktop companion. Each capture still requires native source selection, preview, and Share." })
+    void ctx.permissions.request([...REQUIRED_PERMISSIONS, "screen_recording"], { reason: "Enable an opt-in character desktop companion. Desktop asks for native approval and can remember your source for later shares." })
       .then(() => show()).catch(() => { if (!disposed) status.textContent = "Permissions were not granted. Capture permissions require administrator/owner approval."; });
   };
   showButton.addEventListener("click", showHandler);

@@ -1,3 +1,4 @@
+import type { DesktopCaptureApprovalStatus } from "lumiverse-spindle-types";
 import { parseSettingsPatch } from "./settings";
 import type { CompanionSettings, CompanionSnapshot } from "./settings";
 
@@ -35,6 +36,7 @@ export interface ConnectionOption {
 
 export interface DeviceOption {
   id: string;
+  stableIdentity?: boolean;
   name: string;
   platform: string;
   image: boolean;
@@ -65,6 +67,8 @@ export type ClientMessage = Envelope & (
   | { type: "cancel-shared"; targetId: string }
   | { type: "speech-stage"; targetId: string; stage: "idle" | "synthesizing" | "ready" | "playing" }
   | { type: "catalog"; page: number; activeCharacterId?: string }
+  | { type: "devices" }
+  | { type: "approval"; deviceId: string; connectionId: string; kind: "image" | "video" }
   | { type: "observe"; characterId: string; connectionId: string; deviceId: string; question: string; kind: "image" | "video"; durationSeconds: number }
   | { type: "cancel"; targetId: string }
 );
@@ -74,6 +78,9 @@ export type ServerMessage = Envelope & (
   | { type: "stop-local"; targetId: string; speechOnly: boolean }
   | { type: "open-settings" }
   | { type: "catalog"; catalog: Catalog }
+  | { type: "devices"; devices: DeviceOption[] }
+  | { type: "approval"; status: DesktopCaptureApprovalStatus }
+  | { type: "shortcut"; skipVoice: boolean }
   | { type: "status"; stage: "checking" | "consent" | "generating" | "cancelling" }
   | { type: "text"; text: string }
   | { type: "complete"; text: string; characterName: string; voice: VoiceRef | null; capture: { kind: "image" | "video"; width: number; height: number; durationSeconds?: number } }
@@ -93,10 +100,10 @@ export const ERROR_MESSAGES: Record<ErrorCode, string> = {
   COOLDOWN: "Wait at least 10 seconds between capture requests. The desktop client also limits native prompts.",
   CHARACTER_UNAVAILABLE: "The selected character is no longer available to this account.",
   CONNECTION_UNAVAILABLE: "The selected model connection is no longer available to this account.",
-  DEVICE_UNAVAILABLE: "Enable Extension Screen Capture in the desktop tray, then refresh the devices.",
+  DEVICE_UNAVAILABLE: "The selected desktop is offline. Reconnect it using Set Up Screen Capture in the extension's permissions or desktop tray. Updated desktops keep their saved identity; older clients may need their new registration selected in Settings.",
   MEDIA_UNSUPPORTED: "Choose a capture-capable device and a model that accepts this media type. Video currently requires a Gemini route.",
   PERMISSION_REQUIRED: "Grant Characters, Generation, and the matching capture permission in Extensions. Capture grants require administrator/owner approval.",
-  CAPTURE_FAILED: "The capture was declined, expired, or could not be prepared. Nothing was sent to a model; refresh and try again.",
+  CAPTURE_FAILED: "The capture was declined, expired, or could not be prepared. Nothing was sent to a model. If you used Stop & Discard, use Allow Screen Capture Requests Again in the desktop tray before sharing again.",
   CANCELLED: "Observation cancelled. If the native capture panel is still open, use its Stop & Discard control.",
   TIMED_OUT: "The observation timed out. If the native capture panel is still open, use Stop & Discard.",
   GENERATION_FAILED: "The model request did not complete successfully. Check the selected connection and provider status; this does not necessarily mean the capture type is unsupported.",
@@ -132,12 +139,15 @@ export function parseClientMessage(value: unknown): ClientMessage | null {
   if (value.type === "subscribe" && (value.surface === undefined || value.surface === "settings" || value.surface === "widget")) {
     return { ...envelope, type: "subscribe", surface: value.surface as "settings" | "widget" | undefined };
   }
-  if (["unsubscribe", "clear-state", "stop-speech", "open-settings"].includes(String(value.type))) {
-    return { ...envelope, type: value.type as "unsubscribe" | "clear-state" | "stop-speech" | "open-settings" };
+  if (["unsubscribe", "clear-state", "stop-speech", "open-settings", "devices"].includes(String(value.type))) {
+    return { ...envelope, type: value.type as "unsubscribe" | "clear-state" | "stop-speech" | "open-settings" | "devices" };
   }
   if (value.type === "configure") {
     const patch = parseSettingsPatch(value.patch);
     return patch ? { ...envelope, type: "configure", patch } : null;
+  }
+  if (value.type === "approval" && identifier(value.deviceId) && identifier(value.connectionId) && (value.kind === "image" || value.kind === "video")) {
+    return { ...envelope, type: "approval", deviceId: value.deviceId, connectionId: value.connectionId, kind: value.kind };
   }
   if (value.type === "begin-share" && Number.isSafeInteger(value.revision) && Number(value.revision) >= 0) {
     return { ...envelope, type: "begin-share", revision: Number(value.revision) };

@@ -4,6 +4,7 @@ import type { ClientMessage } from "./protocol";
 import { DEFAULT_SETTINGS, idleActivity, parseSettings } from "./settings";
 import type { CompanionSettings, CompanionSnapshot } from "./settings";
 import type { ResponseBody, Route } from "./worker";
+import { CAPTURE_PENDING } from "./capture-flow";
 
 export const SETTINGS_PATH = "companion-settings.json";
 
@@ -54,7 +55,8 @@ export function createCompanionState(api: SpindleAPI, cancelRun: (route: Route) 
   }
 
   function snapshot(state: UserState): CompanionSnapshot {
-    return { epoch, sequence: state.sequence, revision: state.revision, settings: { ...state.settings }, activity: { ...state.activity } };
+    return { shortcutsAvailable: (api.host.capabilities["command-session-routing-v1"] ?? 0) >= 1 && typeof api.commands?.onInvoked === "function",
+      epoch, sequence: state.sequence, revision: state.revision, settings: { ...state.settings }, activity: { ...state.activity } };
   }
 
   function broadcast(state: UserState, acknowledgement?: Route): void {
@@ -98,7 +100,7 @@ export function createCompanionState(api: SpindleAPI, cancelRun: (route: Route) 
   }
 
   async function handle(message: ClientMessage, route: Route): Promise<boolean> {
-    if (["observe", "catalog", "cancel"].includes(message.type)) return false;
+    if (["observe", "catalog", "devices", "approval", "cancel"].includes(message.type)) return false;
     const sessionKey = JSON.stringify([route.userId, route.frontendSessionId]);
     const session = pendingSessions.get(sessionKey) ?? { count: 0, closed: false };
     session.count += 1; pendingSessions.set(sessionKey, session);
@@ -143,7 +145,7 @@ export function createCompanionState(api: SpindleAPI, cancelRun: (route: Route) 
         if (state.capturing || state.activity.stage === "idle" || !owns(state, { ...route, id: message.targetId })) return;
         if (message.type === "input-stage") {
           state.activity.stage = message.stage;
-          state.activity.message = message.stage === "listening" ? "Listening to the spoken question…" : "Transcribing before requesting screen consent…";
+          state.activity.message = message.stage === "listening" ? "Listening to the spoken question…" : "Transcribing before requesting screen capture…";
         } else {
           release(state); state.activity.stage = "idle"; state.activity.error = true;
           state.activity.message = safeLabel(message.message, 400);
@@ -195,7 +197,7 @@ export function createCompanionState(api: SpindleAPI, cancelRun: (route: Route) 
     if (!state || !owns(state, route) || state.activity.stage === "idle") return;
     if (body.type === "status") {
       state.activity.stage = body.stage;
-      state.activity.message = body.stage === "consent" ? "Use the native picker, preview, then Share or Stop & Discard."
+      state.activity.message = body.stage === "consent" ? CAPTURE_PENDING
         : body.stage === "generating" ? "Your character is reacting to the approved capture…"
         : body.stage === "cancelling" ? "Cancelling. Use Stop & Discard in any native capture panel still open." : "Checking character, model, and desktop…";
     } else if (body.type === "text") state.activity.text = body.text;
@@ -220,11 +222,20 @@ export function createCompanionState(api: SpindleAPI, cancelRun: (route: Route) 
   }
 
   function revoke(): void { for (const state of resolved.values()) { cancel(state); stopLocal(state, true); state.activity.text = ""; state.activity.voice = null; state.activity.characterName = "A fresh perspective"; broadcast(state); } }
+  async function shortcut(userId: string, frontendSessionId: string, skipVoice: boolean): Promise<boolean> {
+    const state = await load(userId);
+    if (disposed || state.activity.stage !== "idle") return false;
+    const candidates = [...state.subscribers.values()].filter((subscriber) => subscriber.frontendSessionId === frontendSessionId);
+    const target = candidates.find((subscriber) => subscriber.surface === "widget") ?? candidates.find((subscriber) => subscriber.surface === "settings");
+    if (!target) return false;
+    api.sendToFrontend({ channel: CHANNEL, id: createMessageId(), clientId: target.clientId, type: "shortcut", skipVoice }, userId, { frontendSessionId });
+    return true;
+  }
   function dispose(): void {
     disposed = true;
     for (const state of resolved.values()) { release(state); state.subscribers.clear(); }
     users.clear(); resolved.clear(); pendingSessions.clear();
   }
 
-  return { handle, beforeObserve, publish, closeSession, revoke, dispose };
+  return { handle, beforeObserve, publish, closeSession, revoke, shortcut, dispose };
 }

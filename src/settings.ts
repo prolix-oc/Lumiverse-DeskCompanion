@@ -39,6 +39,7 @@ export interface CompanionActivity {
 }
 
 export interface CompanionSnapshot {
+  shortcutsAvailable?: boolean;
   epoch: string;
   sequence: number;
   revision: number;
@@ -48,7 +49,7 @@ export interface CompanionSnapshot {
 
 export function idleActivity(): CompanionActivity {
   return { requestId: null, ownerClientId: null, stage: "idle", text: "", characterName: "A fresh perspective", voice: null,
-    message: "Choose a source in the trusted native picker; review it and explicitly Share before a model sees it.", error: false,
+    message: "", error: false,
     speechStage: "idle", speechClientId: null };
 }
 

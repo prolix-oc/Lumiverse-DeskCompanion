@@ -32,13 +32,24 @@ export function fixture() {
   const released: Array<{ assetId: string; userId?: string }> = [];
   const events = new Map<string, (...args: any[]) => void>();
   const stored = new Map<string, unknown>();
+  const registeredCommands: Array<{ id: string }[]> = [];
+  const unregisteredCommands: string[][] = [];
+  const toasts: Array<{ message: string; userId?: string }> = [];
+  const approvalQueries: any[] = [];
+  let commandHandler: (id: string, context: any, origin?: { userId: string; frontendSessionId?: string }) => void | Promise<void> = () => {};
   let handler: (payload: unknown, userId: string, frontendSessionId?: string) => void = () => {};
   const api = {
     userStorage: {
       async getJson(path: string, options: { fallback?: unknown; userId?: string } = {}) { return stored.get(JSON.stringify([options.userId, path])) ?? options.fallback; },
       async setJson(path: string, value: unknown, options: { userId?: string } = {}) { stored.set(JSON.stringify([options.userId, path]), structuredClone(value)); },
     },
-    host: { descriptorVersion: 1, lumiverseVersion: "1.2.4", extensionInstallationId: "installation-a", capabilities: { "desktop-capture-worker-v1": 1, "frontend-session-routing-v1": 1 } },
+    host: { descriptorVersion: 1, lumiverseVersion: "1.2.4", extensionInstallationId: "installation-a", capabilities: { "desktop-capture-worker-v1": 1, "frontend-session-routing-v1": 1, "command-session-routing-v1": 1 } },
+    commands: {
+      register(commands: Array<{ id: string }>) { registeredCommands.push(commands); },
+      unregister(ids: string[]) { unregisteredCommands.push(ids); },
+      onInvoked(callback: typeof commandHandler) { commandHandler = callback; return () => { commandHandler = () => {}; }; },
+    },
+    toast: { info(message: string, options?: { userId?: string }) { toasts.push({ message, userId: options?.userId }); } },
     onFrontendMessage(callback: typeof handler) { handler = callback; return () => { handler = () => {}; }; },
     sendToFrontend(payload: unknown, userId?: string, options?: { frontendSessionId?: string }) { sent.push({ payload, userId, options }); },
     on(event: string, callback: (...args: any[]) => void) { events.set(event, callback); return () => events.delete(event); },
@@ -52,6 +63,7 @@ export function fixture() {
     },
     desktop: { capture: {
       async listDevices(input: any) { gets.push({ kind: "devices", userId: input.userId }); return [device]; },
+      async getApprovalStatus(input: any) { approvalQueries.push(input); return { deviceId: input.deviceId, kind: input.kind, approval: "unknown", source: "unknown", checkedAt: now }; },
       async request(input: any) { requests.push(input); return { ...capture, kind: input.kind, mimeType: input.kind === "video" ? "video/mp4" : capture.mimeType,
         durationSeconds: input.kind === "video" ? input.durationSeconds : undefined }; },
       async release(assetId: string, options?: { userId?: string }) { released.push({ assetId, userId: options?.userId }); },
@@ -68,6 +80,7 @@ export function fixture() {
   };
   const message = (id = "request-a", overrides: Record<string, unknown> = {}) => ({ channel: CHANNEL, id, clientId: "client-a", type: "observe",
     characterId: "character-a", connectionId: "model-a", deviceId: "desktop-a", kind: "image", durationSeconds: 3, question: "What do you notice?", ...overrides });
-  return { api: api as unknown as SpindleAPI, mutable: api, now, capture, connection, device, sent, gets, requests, generations, released, events, stored, message,
+  return { api: api as unknown as SpindleAPI, mutable: api, now, capture, connection, device, sent, gets, requests, generations, released, events, stored, message, registeredCommands, unregisteredCommands, toasts, approvalQueries,
+    invoke: (id = "share-screen", userId = "user-a", frontendSessionId: string | undefined = "session-b") => commandHandler(id, { route: "/", trigger: { type: "keybind", bindingId: "configured", scope: "global" } }, { userId, frontendSessionId }),
     emit(payload: unknown, userId = "user-a", sessionId: string | undefined = "session-a") { handler(payload, userId, sessionId); } };
 }

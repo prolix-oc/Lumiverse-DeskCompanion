@@ -5,6 +5,79 @@ import { DEFAULT_REACTION_PROMPT } from "../src/prompt";
 import { deferred, fixture, settle } from "./fixtures";
 
 describe("Desk Companion worker", () => {
+  test("command actions target one subscriber in the authenticated invoking document and unregister on disposal", async () => {
+    const host = fixture(); const dispose = installCompanion(host.api);
+    try {
+      for (const [user, session, client, surface] of [["alice", "desktop-a", "settings", "settings"], ["alice", "desktop-a", "widget", "widget"], ["alice", "desktop-b", "other-window", "widget"], ["bob", "desktop-a", "bob-widget", "widget"]]) {
+        host.emit(host.message(client, { type: "subscribe", clientId: client, surface }), user, session);
+      }
+      await settle();
+      expect(host.registeredCommands[0].map(command => command.id)).toEqual(["share-screen", "share-screen-without-voice"]);
+      await host.invoke("share-screen-without-voice", "alice", "desktop-a");
+      const triggers = host.sent.filter(message => message.payload.type === "shortcut");
+      expect(triggers).toHaveLength(1);
+      expect(triggers[0]).toMatchObject({ userId: "alice", options: { frontendSessionId: "desktop-a" }, payload: { clientId: "widget", skipVoice: true } });
+      await host.invoke("unknown", "alice", "desktop-a"); await host.invoke("share-screen", "alice", "");
+      expect(host.sent.filter(message => message.payload.type === "shortcut")).toHaveLength(1);
+      host.emit(host.message("close", { type: "unsubscribe", clientId: "widget" }), "alice", "desktop-a"); await settle();
+      await host.invoke("share-screen", "alice", "desktop-a");
+      expect(host.sent.at(-1)).toMatchObject({ userId: "alice", options: { frontendSessionId: "desktop-a" }, payload: { clientId: "settings", skipVoice: false } });
+      expect(host.requests).toHaveLength(0); expect(host.generations).toHaveLength(0);
+      dispose(); await host.invoke();
+      expect(host.unregisteredCommands).toEqual([["share-screen", "share-screen-without-voice"]]);
+    } finally { dispose(); }
+  });
+
+  test("older hosts do not register capture shortcuts or query unsupported approval APIs", async () => {
+    const host = fixture(); host.mutable.host.capabilities["command-session-routing-v1"] = 0;
+    const dispose = installCompanion(host.api);
+    try {
+      expect(host.registeredCommands).toHaveLength(0);
+      host.emit(host.message("approval", { type: "approval", userId: "attacker" }), "owner", "owned-window"); await settle();
+      expect(host.approvalQueries).toHaveLength(0);
+      expect(host.sent.at(-1)).toMatchObject({ userId: "owner", options: { frontendSessionId: "owned-window" }, payload: { type: "approval", status: { approval: "unknown", source: "unknown" } } });
+      expect(host.requests).toHaveLength(0);
+    } finally { dispose(); }
+  });
+
+  test("approval discovery uses trusted ownership and returns only the public status fields", async () => {
+    const host = fixture(); Object.assign(host.mutable.host.capabilities, { "desktop-capture-approval-status-v1": 1 });
+    host.mutable.desktop.capture.getApprovalStatus = async input => {
+      host.approvalQueries.push(input);
+      return { ...input, approval: "remembered", source: "ready", checkedAt: host.now, sourceTitle: "PRIVATE", credentials: "SECRET" };
+    };
+    const dispose = installCompanion(host.api);
+    try {
+      host.emit(host.message("approval", { type: "approval", userId: "attacker" }), "owner", "owned-window"); await settle();
+      expect(host.approvalQueries).toEqual([{ deviceId: "desktop-a", connectionId: "model-a", kind: "image", userId: "owner" }]);
+      expect(host.sent.at(-1)?.payload.status).toEqual({ deviceId: "desktop-a", kind: "image", approval: "remembered", source: "ready", checkedAt: host.now });
+      expect(JSON.stringify(host.sent)).not.toContain("SECRET"); expect(JSON.stringify(host.sent)).not.toContain("PRIVATE");
+      expect(host.requests).toHaveLength(0); expect(host.generations).toHaveLength(0);
+    } finally { dispose(); }
+  });
+
+  test("device discovery is scoped to the trusted account and strips expired registrations and native internals", async () => {
+    const host = fixture();
+    host.device.name = "My\nDesktop\u202e";
+    host.mutable.desktop.capture.listDevices = async (input) => {
+      host.gets.push({ kind: "devices", userId: input.userId });
+      return [{ ...host.device, source: "PRIVATE_NATIVE_SOURCE", transportToken: "SECRET" },
+        { ...host.device, id: "expired", expiresAt: host.now - 1 }];
+    };
+    const dispose = installCompanion(host.api);
+    try {
+      host.emit({ channel: CHANNEL, id: "discover-a", clientId: "widget-a", type: "devices", userId: "attacker" }, "owner", "document-a");
+      await settle();
+      expect(host.gets).toEqual([{ kind: "devices", userId: "owner" }]);
+      expect(host.sent.at(-1)).toEqual({ userId: "owner", options: { frontendSessionId: "document-a" }, payload: {
+        channel: CHANNEL, id: "discover-a", clientId: "widget-a", type: "devices",
+        devices: [{ id: "desktop-a", name: "My Desktop ", platform: "windows", image: true, video: true }],
+      } });
+      expect(host.requests).toHaveLength(0); expect(host.generations).toHaveLength(0);
+      expect(JSON.stringify(host.sent)).not.toContain("SECRET"); expect(JSON.stringify(host.sent)).not.toContain("PRIVATE_NATIVE_SOURCE");
+    } finally { dispose(); }
+  });
+
   test("binds a Gemini 3.8 video request to its explicitly approved provider and model", async () => {
     const host = fixture(); host.connection.model = "gemini-3.8-flash";
     const dispose = installCompanion(host.api);

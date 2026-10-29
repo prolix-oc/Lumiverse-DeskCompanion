@@ -1,14 +1,14 @@
 {
   "identifier": "desk_companion",
-  "version": "0.1.3",
+  "version": "0.1.5",
   "name": "Desk Companion",
-  "author": "Lumiverse",
+  "author": "Prolix",
   "github": "https://github.com/prolix-oc/Lumiverse-DeskCompanion",
   "homepage": "https://lumiverse.chat",
-  "description": "An opt-in character companion: review a desktop capture, ask a model about it, and hear the character's reply in a floating desktop widget.",
+  "description": "A character beside your desktop: share a screenshot or clip from a widget or keyboard shortcut, with optional voice input and remembered capture approval.",
   "permissions": ["ui_panels", "characters", "generation", "screen_capture", "screen_recording"],
   "entry_backend": "dist/backend.js",
   "entry_frontend": "dist/frontend.js",
   "entry_frontend_widget": "dist/widget.js",
-  "minimum_lumiverse_version": "1.2.4"
+  "minimum_lumiverse_version": "1.2.5"
 }

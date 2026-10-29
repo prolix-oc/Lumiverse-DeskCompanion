@@ -1,8 +1,10 @@
 import type { CapturedMediaRef, CharacterDTO, GenerationReasoningOverrideDTO, GenerationRequestDTO, SpindleAPI } from "lumiverse-spindle-types";
 import { assembleMessages } from "./prompt";
 import { CHANNEL, CHARACTER_PAGE_SIZE, DeskError, ERROR_MESSAGES, MAX_REPLY, characterVoice, mediaSupport, parseClientMessage, record, safeLabel } from "./protocol";
-import type { Catalog, CharacterOption, ClientMessage, ErrorCode, ServerMessage } from "./protocol";
+import type { Catalog, CharacterOption, ClientMessage, DeviceOption, ErrorCode, ServerMessage } from "./protocol";
 import { createCompanionState } from "./companion-state";
+import { CAPTURE_COMMANDS, QUICK_SHARE_COMMAND, SHARE_COMMAND } from "./shortcuts";
+import type { CommandOrigin } from "./shortcuts";
 
 export interface Route {
   userId: string;
@@ -78,16 +80,32 @@ export function installCompanion(api: SpindleAPI, options: { now?: () => number;
       && typeof api.desktop?.capture?.request === "function";
   }
 
-  async function catalog(message: Extract<ClientMessage, { type: "catalog" }>, route: Route): Promise<void> {
-    const key = JSON.stringify([route.userId, route.frontendSessionId, route.clientId]);
+  async function listDevices(userId: string): Promise<DeviceOption[]> {
+    const devices = await api.desktop.capture.listDevices({ userId });
+    return devices.filter((device) => device.expiresAt > now()).map((device) => ({ id: device.id, ...(device.stableIdentity === true ? { stableIdentity: true } : {}), name: safeLabel(device.name),
+      platform: device.platform, image: device.capabilities.image, video: device.capabilities.video }));
+  }
+
+  async function catalog(message: Extract<ClientMessage, { type: "catalog" | "devices" | "approval" }>, route: Route): Promise<void> {
+    const key = JSON.stringify([route.userId, route.frontendSessionId, route.clientId, message.type]);
     if (catalogJobs.has(key) || catalogJobs.size >= 16) { failure(route, "BUSY"); return; }
     catalogJobs.add(key);
     try {
       if (!compatible()) throw new DeskError("HOST_UNSUPPORTED");
+      if (message.type === "approval") {
+        const status = (api.host.capabilities["desktop-capture-approval-status-v1"] ?? 0) >= 1 && typeof api.desktop.capture.getApprovalStatus === "function"
+          ? await api.desktop.capture.getApprovalStatus({ deviceId: message.deviceId, connectionId: message.connectionId, kind: message.kind, userId: route.userId })
+          : { deviceId: message.deviceId, kind: message.kind, approval: "unknown" as const, source: "unknown" as const, checkedAt: now() };
+        send(route, { type: "approval", status: { deviceId: status.deviceId, kind: status.kind, approval: status.approval, source: status.source, checkedAt: status.checkedAt } }); return;
+      }
+      if (message.type === "devices") {
+        send(route, { type: "devices", devices: await listDevices(route.userId) });
+        return;
+      }
       const [characters, connections, devices] = await Promise.all([
         api.characters.list({ limit: CHARACTER_PAGE_SIZE, offset: message.page * CHARACTER_PAGE_SIZE, userId: route.userId }),
         api.connections.list(route.userId),
-        api.desktop.capture.listDevices({ userId: route.userId }),
+        listDevices(route.userId),
       ]);
       const choices = characters.data.map(characterOption);
       if (message.activeCharacterId && !choices.some((choice) => choice.id === message.activeCharacterId)) {
@@ -97,8 +115,7 @@ export function installCompanion(api: SpindleAPI, options: { now?: () => number;
       const result: Catalog = { characters: choices, characterTotal: characters.total, page: message.page,
         connections: connections.slice(0, 200).map((connection) => ({ id: connection.id, name: safeLabel(connection.name),
           provider: connection.provider, model: safeLabel(connection.model), ...mediaSupport(connection.provider, connection.model) })),
-        devices: devices.filter((device) => device.expiresAt > now()).map((device) => ({ id: device.id, name: safeLabel(device.name),
-          platform: device.platform, image: device.capabilities.image, video: device.capabilities.video })) };
+        devices };
       send(route, { type: "catalog", catalog: result });
     } catch (error) {
       failure(route, errorCode(error, "checking"));
@@ -212,7 +229,7 @@ export function installCompanion(api: SpindleAPI, options: { now?: () => number;
       }
       return;
     }
-    if (message.type === "catalog") void catalog(message, route);
+    if (message.type === "catalog" || message.type === "devices" || message.type === "approval") void catalog(message, route);
     else if (message.type === "observe") void observe(message, route);
     else void sharedState.handle(message, route).catch((error) => failure(route, error instanceof DeskError ? error.code : "SETTINGS_FAILED"));
   });
@@ -228,10 +245,19 @@ export function installCompanion(api: SpindleAPI, options: { now?: () => number;
       sharedState.revoke();
     }
   });
+  const shortcutsAvailable = (api.host.capabilities["command-session-routing-v1"] ?? 0) >= 1 && typeof api.commands?.onInvoked === "function";
+  const unsubscribeCommands = shortcutsAvailable ? api.commands.onInvoked(async (commandId, _context, origin?: CommandOrigin) => {
+    if (disposed || !origin?.userId || !origin.frontendSessionId || ![SHARE_COMMAND, QUICK_SHARE_COMMAND].includes(commandId)) return;
+    if (!await sharedState.shortcut(origin.userId, origin.frontendSessionId, commandId === QUICK_SHARE_COMMAND)) {
+      api.toast.info("Open Desk Companion in this Desktop window and finish any active share before using its shortcut.", { userId: origin.userId });
+    }
+  }) : () => {};
+  if (shortcutsAvailable) api.commands.register(CAPTURE_COMMANDS);
   return () => {
     if (disposed) return;
     disposed = true;
-    unsubscribeMessages(); unsubscribeClosed(); unsubscribePermissions();
+    unsubscribeMessages(); unsubscribeClosed(); unsubscribePermissions(); unsubscribeCommands();
+    if (shortcutsAvailable) api.commands.unregister(CAPTURE_COMMANDS.map((command) => command.id));
     for (const run of active.values()) run.controller.abort();
     lastCapture.clear();
     sharedState.dispose();
