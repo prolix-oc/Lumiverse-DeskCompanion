@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { JSDOM } from "jsdom";
-import type { SpindleFrontendContext } from "lumiverse-spindle-types";
+import type { SpindleFrontendContext, SpindleSTTProviderOption, SpindleSTTStartOptions } from "lumiverse-spindle-types";
 import { mountView } from "../src/companion-view";
 import { installCompanion } from "../src/worker";
 import { deferred, fixture, settle } from "./fixtures";
 
-async function widget(options: { stt?: Promise<Response>; tts?: Promise<Response>; autoplayBlocked?: boolean; microphoneDenied?: boolean; offline?: boolean; approval?: boolean; desktop?: boolean; oldHost?: boolean } = {}) {
+async function widget(options: { stt?: Promise<Response>; silence?: Promise<void>; tts?: Promise<Response>; autoplayBlocked?: boolean; microphoneDenied?: boolean; offline?: boolean; approval?: boolean; desktop?: boolean; oldHost?: boolean;
+  hostStt?: boolean; hostSpeech?: boolean; noConnections?: boolean; noMedia?: boolean; providers?: SpindleSTTProviderOption[] } = {}) {
   const host = fixture();
   if (options.approval) Object.assign(host.mutable.host.capabilities, { "desktop-capture-approval-status-v1": 1 });
   if (options.oldHost) host.mutable.host.capabilities["command-session-routing-v1"] = 0;
@@ -20,9 +21,14 @@ async function widget(options: { stt?: Promise<Response>; tts?: Promise<Response
     timers.set(id, { callback, delay }); return id;
   }) as typeof dom.window.setTimeout;
   dom.window.clearTimeout = (id) => { timers.delete(id); unschedule(id); };
-  const globals = ["window", "document", "navigator", "Option", "MediaRecorder", "fetch"];
+  const globals = ["window", "document", "navigator", "Option", "fetch"];
   const previous = new Map(globals.map((name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
-  const requests: Array<{ url: string; input?: RequestInit }> = [];
+  const requests: string[] = [];
+  const speechCalls: Array<{ input: { text: string }; options: { connectionId?: string }; stopped: boolean }> = [];
+  const speechStops = new Set<() => void>();
+  const speechListeners = new Set<(speaking: boolean) => void>();
+  let speaking = false;
+  const recognitions: Array<{ options: SpindleSTTStartOptions; cancelled: boolean; finished: boolean }> = [];
   const outgoing: any[] = [];
   const events = new Map<string, (payload: unknown) => void>();
   let microphoneRequests = 0;
@@ -31,43 +37,9 @@ async function widget(options: { stt?: Promise<Response>; tts?: Promise<Response
   let clock = host.now;
   let devices = options.offline ? [] : [host.device];
   const backendMessages = new Map<string, Set<(payload: unknown) => void>>();
-  const stream = { getTracks: () => [{ stop() { tracksStopped += 1; } }] } as unknown as MediaStream;
-  class Recorder {
-    state = "inactive";
-    mimeType = "audio/mp4";
-    ondataavailable: ((event: BlobEvent) => void) | null = null;
-    onstop: (() => void) | null = null;
-    onerror: (() => void) | null = null;
-    static isTypeSupported(mime: string) { return mime === "audio/mp4"; }
-    start() {
-      this.state = "recording";
-      queueMicrotask(() => {
-        if (this.state === "inactive") return;
-        this.ondataavailable?.({ data: new Blob(["voice"]) } as BlobEvent);
-        this.stop();
-      });
-    }
-    stop() { this.state = "inactive"; this.onstop?.(); }
-  }
-  Object.defineProperty(dom.window, "isSecureContext", { value: true });
-  Object.defineProperty(dom.window.navigator, "mediaDevices", { value: { async getUserMedia() {
-    microphoneRequests += 1;
-    if (options.microphoneDenied) throw new Error("Denied");
-    return stream;
-  } } });
-  dom.window.HTMLMediaElement.prototype.play = async () => { if (options.autoplayBlocked) throw new Error("Autoplay blocked"); playback += 1; };
-  dom.window.HTMLMediaElement.prototype.pause = () => {};
-  dom.window.HTMLMediaElement.prototype.load = () => {};
-  const request = (async (url: string | URL | Request, input?: RequestInit) => {
-    requests.push({ url: String(url), input });
-    if (String(url).startsWith("/api/v1/tts-connections")) return Response.json({ data: [{ id: "voice-a", name: "Mira's voice", provider: "google", voice: "warm" }] });
-    if (String(url).startsWith("/api/v1/stt-connections")) return Response.json({ data: [{ id: "stt-a", name: "Dictation", provider: "openai" }] });
-    if (url === "/api/v1/stt/transcribe") return options.stt ?? Response.json({ text: "What do you think?" });
-    if (url === "/api/v1/tts/synthesize") return options.tts ?? new Response(new Uint8Array([1, 2, 3]), { headers: { "Content-Type": "audio/wav" } });
-    throw new Error("Unexpected endpoint");
-  }) as typeof fetch;
+  const request = (async (url: unknown) => { requests.push(String(url)); throw new Error("Direct REST requests are forbidden"); }) as typeof fetch;
   const replacements = { window: dom.window, document: dom.window.document, navigator: dom.window.navigator,
-    Option: dom.window.Option, MediaRecorder: Recorder, fetch: request };
+    Option: dom.window.Option, fetch: request };
   for (const [name, value] of Object.entries(replacements)) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
   host.mutable.desktop.capture.request = async (input) => { host.requests.push(input); return approval.promise; };
   host.mutable.desktop.capture.listDevices = async (input) => { host.gets.push({ kind: "devices", userId: input.userId }); return devices; };
@@ -77,13 +49,65 @@ async function widget(options: { stt?: Promise<Response>; tts?: Promise<Response
   };
   const uninstall = installCompanion(host.api, { now: () => clock });
   function context(sessionId: string): SpindleFrontendContext { return { manifest: { identifier: "desk_companion" },
-    host: { ...host.mutable.host, capabilities: { "frontend-session-origin-v1": 1 } }, frontendSessionId: sessionId,
+    host: { ...host.mutable.host, capabilities: { "frontend-session-origin-v1": 1, ...(options.hostStt !== false ? { "speech-to-text-v1": 1 } : {}), ...(options.hostSpeech !== false ? { "text-to-speech-v1": 1, "connection-kinds-v1": 1 } : {}) } }, frontendSessionId: sessionId,
+    ...(options.hostStt !== false ? { stt: {
+      listProviders: () => options.providers ?? [
+        { id: "whistle", name: "Whistle (on this device)", onDevice: true, available: true, supportsAudioTranscription: true },
+        { id: "connection", name: "STT connection", onDevice: false, available: false, unavailableReason: "connectionRequired", supportsAudioTranscription: true },
+      ],
+      start(input: SpindleSTTStartOptions) {
+        microphoneRequests += 1;
+        if (options.microphoneDenied) throw new DOMException("Denied", "NotAllowedError");
+        const call = { options: input, cancelled: false, finished: false }; recognitions.push(call);
+        const final = deferred<{ text: string; provider: string }>();
+        input.onStatus?.({ phase: "listening" });
+        const process = async () => {
+          await (options.silence ?? Promise.resolve());
+          if (call.cancelled) return;
+          input.onStatus?.({ phase: input.provider === "whistle" ? "loading" : "processing", progress: 0.5 });
+          const response = await (options.stt ?? Response.json({ text: "What do you think?" }));
+          if (call.cancelled) return;
+          if (!response.ok) throw new Error("SECRET_PROVIDER_BODY");
+          call.finished = true; tracksStopped += 1;
+          final.resolve({ ...await response.clone().json(), provider: input.provider });
+        };
+        void process().catch(final.reject);
+        return { provider: input.provider, ready: Promise.resolve(), result: final.promise,
+          stop() { return final.promise; },
+          cancel() { if (call.cancelled || call.finished) return; call.cancelled = true; tracksStopped += 1; final.reject(new DOMException("Aborted", "AbortError")); },
+        };
+      },
+    } } : {}),
+    connections: { async list({ kind }: { kind: string }) {
+      if (kind === "stt" && options.noConnections) throw new Error("No connections available");
+      return kind === "tts" ? [{ id: "voice-a", kind, name: "Mira's voice", provider: "google", voice: "warm" }]
+        : [{ id: "stt-a", kind, name: "Dictation", provider: "openai" }];
+    } },
+    tts: {
+      async speak(input: { text: string }, settings: { connectionId?: string }) {
+        const call = { input, options: settings, stopped: false }; speechCalls.push(call);
+        const finished = deferred<void>();
+        const stop = () => { call.stopped = true; speaking = false; for (const listener of speechListeners) listener(false); finished.resolve(); };
+        speechStops.add(stop);
+        const startup = (async () => {
+          const response = await (options.tts ?? new Response("audio"));
+          if (call.stopped) return;
+          if (!response.ok || options.autoplayBlocked) throw new Error("PRIVATE_PROVIDER_ERROR");
+          playback += 1; speaking = true; for (const listener of speechListeners) listener(true);
+          await finished.promise;
+        })();
+        try { await Promise.race([startup, finished.promise]); } finally { speechStops.delete(stop); }
+      },
+      stop() { for (const stop of speechStops) stop(); },
+      isSpeaking: () => speaking,
+      subscribe(callback: (speaking: boolean) => void) { speechListeners.add(callback); return () => speechListeners.delete(callback); },
+    },
     client: { getInfo: () => ({ bridges: { desktop: options.desktop === true } }) },
     components: { mountKeybindingEditor(target: HTMLElement, input: { commandId: string }) {
       const editor = { target, commandId: input.commandId, destroyed: false }; editors.push(editor);
       return { destroy() { editor.destroyed = true; } };
     } },
-    permissions: { async getGranted() { return ["ui_panels", "characters", "generation", "screen_capture", "screen_recording"]; } },
+    permissions: { async getGranted() { return ["ui_panels", "characters", "generation", "screen_capture", "screen_recording", ...(options.noMedia ? [] : ["media"])]; } },
     getActiveChat: () => ({ characterId: "character-a", chatId: null }),
     events: { on(name: string, callback: (payload: unknown) => void) { events.set(name, callback); return () => events.delete(name); } },
     sendToBackend(payload: unknown) { outgoing.push(payload); host.emit(payload, "user-a", sessionId); },
@@ -108,14 +132,14 @@ async function widget(options: { stt?: Promise<Response>; tts?: Promise<Response
     }
     await settle();
   };
-  return { host, view, settings, context, dom, outgoing, events, element, enable, synchronize, requests, editors,
+  return { host, view, settings, context, dom, outgoing, events, element, enable, synchronize, requests, editors, recognitions, speechCalls, isSpeaking: () => speaking,
     setDevices: (value: typeof devices) => { devices = value; },
     advanceClock: () => { clock += 10001; },
     discover: () => runTimers(10000),
     expireDiscovery: () => runTimers(8000),
     expireApproval: () => runTimers(12000),
+    expireInput: () => runTimers(60000),
     microphoneRequests: () => microphoneRequests, tracksStopped: () => tracksStopped, playback: () => playback,
-    paid: (path: string) => requests.filter((entry) => entry.url === path),
     approve: async () => { approval.resolve(host.capture); await settle(); },
     message: (payload: unknown) => { for (const callback of backendMessages.get("session-b") ?? []) callback(payload); },
     async close() {
@@ -130,6 +154,116 @@ async function widget(options: { stt?: Promise<Response>; tts?: Promise<Response
 }
 
 describe("configured widget share pipeline", () => {
+  test("a button starts host input synchronously and waits for silence instead of a duration", async () => {
+    const silence = deferred<void>(); const screen = await widget({ silence: silence.promise });
+    try {
+      await screen.enable("voice-input");
+      screen.element<HTMLButtonElement>("observe").click();
+      expect(screen.microphoneRequests()).toBe(1);
+      await settle();
+      expect(screen.recognitions[0].options.continuous).toBe(false);
+      expect(screen.settings.panel.querySelector('[data-role="voice-seconds"]')).toBeNull();
+      expect(screen.element("badge").textContent).toBe("Listening");
+      expect(screen.host.requests).toHaveLength(0);
+      await screen.host.invoke(); await settle(); expect(screen.recognitions).toHaveLength(1);
+      silence.resolve(); await settle();
+      expect(screen.host.requests).toHaveLength(1); await screen.approve();
+      expect(screen.host.generations[0].messages[1].content[0].text).toBe("What do you think?");
+      expect(screen.requests).toHaveLength(0);
+    } finally { silence.resolve(); await screen.close(); }
+  });
+
+  test("Cancel and the maximum timeout close listening sessions without a later capture", async () => {
+    for (const action of ["cancel", "timeout"]) {
+      const silence = deferred<void>(); const screen = await widget({ silence: silence.promise });
+      try {
+        await screen.enable("voice-input"); screen.element<HTMLButtonElement>("observe").click(); await settle();
+        if (action === "cancel") screen.element<HTMLButtonElement>("cancel").click();
+        else await screen.expireInput();
+        await settle();
+        expect(screen.recognitions[0].cancelled).toBe(true);
+        silence.resolve(); await settle();
+        expect(screen.host.requests).toHaveLength(0); expect(screen.host.generations).toHaveLength(0);
+      } finally { silence.resolve(); await screen.close(); }
+    }
+  });
+
+  test("a rejected button reservation cancels input started in the user gesture", async () => {
+    const silence = deferred<void>(); const screen = await widget({ silence: silence.promise });
+    const emit = screen.host.emit; let reservation: any;
+    try {
+      await screen.enable("voice-input");
+      screen.host.emit = (payload: any, userId, sessionId) => {
+        if (payload.type === "begin-share") reservation = payload;
+        else emit(payload, userId, sessionId);
+      };
+      screen.element<HTMLButtonElement>("observe").click();
+      expect(screen.microphoneRequests()).toBe(1);
+      screen.message({ ...reservation, type: "error", code: "BUSY", message: "Another share started." }); await settle();
+      expect(screen.recognitions[0].cancelled).toBe(true);
+      silence.resolve(); await settle();
+      expect(screen.host.requests).toHaveLength(0); expect(screen.host.generations).toHaveLength(0);
+    } finally { silence.resolve(); await screen.close(); }
+  });
+
+  test("Whistle works without saved STT connections and a shortcut transcribes exactly once through Spindle", async () => {
+    const transcript = deferred<Response>(); const screen = await widget({ noConnections: true, stt: transcript.promise });
+    try {
+      const provider = screen.element<HTMLSelectElement>("stt-provider");
+      expect([...provider.options].find((option) => option.value === "whistle")?.disabled).toBe(false);
+      provider.value = "whistle"; provider.dispatchEvent(new screen.dom.window.Event("input")); await screen.synchronize();
+      await screen.enable("voice-input"); await screen.enable("auto-speak");
+      expect(screen.element("stt-connection").hidden).toBe(true);
+      expect(screen.element("widget-summary").textContent).toContain("on this device");
+      await screen.host.invoke(); await settle();
+      expect(screen.recognitions).toHaveLength(1); expect(screen.microphoneRequests()).toBe(1);
+      expect(screen.recognitions[0].options.provider).toBe("whistle");
+      expect(Object.hasOwn(screen.recognitions[0].options, "connectionId")).toBe(false);
+      expect(screen.element("status").textContent).toContain("Loading Whistle");
+      await screen.host.invoke(); await settle(); expect(screen.recognitions).toHaveLength(1);
+      transcript.resolve(Response.json({ text: "What changed?" })); await settle(); await screen.approve();
+      expect(screen.host.generations[0].messages[1].content[0].text).toBe("What changed?");
+      expect(screen.speechCalls).toHaveLength(1); expect(screen.requests).toHaveLength(0);
+    } finally { transcript.resolve(Response.json({ text: "late" })); await screen.close(); }
+  });
+
+  test("missing Media permission blocks voice while the quick shortcut still shares", async () => {
+    const screen = await widget({ noMedia: true });
+    try {
+      await screen.enable("voice-input");
+      expect(screen.element<HTMLButtonElement>("observe").disabled).toBe(true);
+      expect(screen.element("stt-guidance").textContent).toContain("grant Media");
+      await screen.host.invoke(); await settle(); expect(screen.microphoneRequests()).toBe(0);
+      await screen.host.invoke("share-screen-without-voice"); await settle();
+      expect(screen.host.requests).toHaveLength(1); expect(screen.recognitions).toHaveLength(0);
+      expect(screen.requests).toHaveLength(0);
+    } finally { await screen.close(); }
+  });
+
+  test("older speech hosts keep text sharing and cannot fall back to REST", async () => {
+    const screen = await widget({ hostStt: false, hostSpeech: false });
+    try {
+      expect([...screen.element<HTMLSelectElement>("stt-provider").options].every((option) => option.disabled)).toBe(true);
+      expect(screen.element("tts-guidance").textContent).toContain("Update Lumiverse");
+      screen.element<HTMLButtonElement>("observe").click(); await settle(); await screen.approve();
+      expect(screen.host.generations).toHaveLength(1); expect(screen.requests).toHaveLength(0);
+      expect(screen.speechCalls).toHaveLength(0); expect(screen.recognitions).toHaveLength(0);
+    } finally { await screen.close(); }
+  });
+
+  test("Whistle failure stops before capture without switching to a connection", async () => {
+    const screen = await widget({ stt: Promise.resolve(new Response("PRIVATE_PROVIDER_ERROR", { status: 502 })) });
+    try {
+      const provider = screen.element<HTMLSelectElement>("stt-provider"); provider.value = "whistle";
+      provider.dispatchEvent(new screen.dom.window.Event("input")); await screen.synchronize(); await screen.enable("voice-input");
+      screen.element<HTMLButtonElement>("observe").click(); await settle();
+      expect(screen.recognitions).toHaveLength(1); expect(screen.host.requests).toHaveLength(0);
+      expect(screen.element("status").textContent).toContain("Whistle could not transcribe");
+      expect(screen.element("status").textContent).not.toContain("PRIVATE_PROVIDER_ERROR");
+      expect(screen.requests).toHaveLength(0);
+    } finally { await screen.close(); }
+  });
+
   test("a shortcut follows configured voice input once and ignores repeat presses while transcribing", async () => {
     const transcript = deferred<Response>(); const screen = await widget({ stt: transcript.promise });
     try {
@@ -139,13 +273,14 @@ describe("configured widget share pipeline", () => {
       expect(screen.element("badge").textContent).toBe("Transcribing");
       expect(screen.host.requests).toHaveLength(0);
       await screen.host.invoke(); await settle();
-      expect(screen.microphoneRequests()).toBe(1); expect(screen.paid("/api/v1/stt/transcribe")).toHaveLength(1);
+      expect(screen.microphoneRequests()).toBe(1); expect(screen.recognitions).toHaveLength(1);
+      expect(screen.recognitions[0].options).toMatchObject({ provider: "connection", connectionId: "stt-a" });
       transcript.resolve(Response.json({ text: "What changed?" })); await settle();
       expect(screen.host.requests).toHaveLength(1);
       await screen.approve();
       expect(screen.host.generations).toHaveLength(1);
       expect(screen.host.generations[0].messages[1].content[0].text).toBe("What changed?");
-      expect(screen.paid("/api/v1/tts/synthesize")).toHaveLength(1);
+      expect(screen.speechCalls).toHaveLength(1);
     } finally { transcript.resolve(Response.json({ text: "late" })); await screen.close(); }
   });
 
@@ -156,11 +291,11 @@ describe("configured widget share pipeline", () => {
       const question = screen.element<HTMLTextAreaElement>("question"); question.value = "Check this calendar";
       question.dispatchEvent(new screen.dom.window.Event("input")); await screen.synchronize();
       await screen.host.invoke("share-screen-without-voice"); await settle();
-      expect(screen.microphoneRequests()).toBe(0); expect(screen.paid("/api/v1/stt/transcribe")).toHaveLength(0);
+      expect(screen.microphoneRequests()).toBe(0); expect(screen.recognitions).toHaveLength(0);
       expect(screen.host.requests).toHaveLength(1); await screen.approve();
       expect(screen.host.generations[0].messages[1].content[0].text).toBe("Check this calendar");
       expect(screen.element<HTMLInputElement>("voice-input").checked).toBe(true);
-      expect(screen.paid("/api/v1/tts/synthesize")).toHaveLength(1);
+      expect(screen.speechCalls).toHaveLength(1);
     } finally { await screen.close(); }
   });
 
@@ -298,7 +433,7 @@ describe("configured widget share pipeline", () => {
       screen.element<HTMLButtonElement>("stop-speech").click();
       emit(reservation.payload, reservation.userId, reservation.sessionId); await settle(); await screen.approve();
       expect(screen.host.requests).toHaveLength(1); expect(screen.host.generations).toHaveLength(1);
-      expect(screen.paid("/api/v1/tts/synthesize")).toHaveLength(0);
+      expect(screen.speechCalls).toHaveLength(0);
     } finally { screen.host.emit = emit; await screen.close(); }
   });
 
@@ -317,7 +452,7 @@ describe("configured widget share pipeline", () => {
       expect(screen.element("capture-readiness").textContent).toContain("reuses your saved source and approval when available");
       expect(screen.host.gets.filter((entry) => entry.kind !== "devices")).toHaveLength(resourceLoads);
       expect(screen.host.requests).toHaveLength(0); expect(screen.host.generations).toHaveLength(0);
-      expect(screen.microphoneRequests()).toBe(0); expect(screen.paid("/api/v1/tts/synthesize")).toHaveLength(0);
+      expect(screen.microphoneRequests()).toBe(0); expect(screen.speechCalls).toHaveLength(0);
     } finally { await screen.close(); }
   });
 
@@ -433,10 +568,10 @@ describe("configured widget share pipeline", () => {
       expect(reopened.panel.querySelector('[data-role="reply"]')!.textContent).toBe("You have a calendar open.");
       expect(reopened.panel.querySelector('[data-role="widget-summary"]')!.textContent).toContain("Mira");
       expect(reopened.panel.querySelectorAll("select,input,textarea")).toHaveLength(0);
-      expect(screen.paid("/api/v1/tts/synthesize")).toHaveLength(1);
+      expect(screen.speechCalls).toHaveLength(1);
       expect(reopened.panel.querySelector('[data-role="speech-status"]')!.textContent).toContain("Speaking in another companion window");
       reopened.panel.querySelector<HTMLButtonElement>('[data-role="stop-speech"]')!.click(); await settle();
-      expect(screen.element<HTMLAudioElement>("audio").hidden).toBe(true);
+      expect(screen.isSpeaking()).toBe(false);
       reopened.panel.querySelector<HTMLButtonElement>('[data-role="clear"]')!.click(); await settle();
       expect(screen.element("reply").textContent).not.toContain("calendar");
     } finally { reopened?.dispose(); await screen.close(); }
@@ -451,7 +586,7 @@ describe("configured widget share pipeline", () => {
       expect(other.panel.querySelector<HTMLButtonElement>('[data-role="observe"]')!.disabled).toBe(true);
       expect(other.panel.querySelector('[data-role="badge"]')!.textContent).toBe("Transcribing");
       other.panel.querySelector<HTMLButtonElement>('[data-role="cancel"]')!.click(); await settle();
-      expect(screen.paid("/api/v1/stt/transcribe")[0].input?.signal?.aborted).toBe(true);
+      expect(screen.recognitions[0].options.signal?.aborted).toBe(true);
       transcription.resolve(Response.json({ text: "Too late" })); await settle();
       expect(screen.microphoneRequests()).toBe(1); expect(screen.host.requests).toHaveLength(0);
       expect(other.panel.querySelector<HTMLButtonElement>('[data-role="observe"]')!.disabled).toBe(false);
@@ -467,27 +602,26 @@ describe("configured widget share pipeline", () => {
       screen.element<HTMLButtonElement>("observe").click(); await settle();
       expect(screen.host.requests).toHaveLength(1); expect(screen.host.generations).toHaveLength(0);
       await screen.approve();
-      expect(screen.host.generations).toHaveLength(1); expect(screen.paid("/api/v1/tts/synthesize")).toHaveLength(0);
+      expect(screen.host.generations).toHaveLength(1); expect(screen.speechCalls).toHaveLength(0);
       expect(screen.microphoneRequests()).toBe(0); expect(screen.element("reply").textContent).toBe("You have a calendar open.");
     } finally { await screen.close(); }
   });
-  test("one main action runs timed STT, approved capture, character generation, and TTS exactly once", async () => {
+  test("one main action runs silence-ended STT, approved capture, character generation, and TTS exactly once", async () => {
     const screen = await widget();
     try {
       await screen.enable("auto-speak"); await screen.enable("voice-input");
       screen.element<HTMLButtonElement>("observe").click(); await settle();
       expect(screen.microphoneRequests()).toBe(1); expect(screen.tracksStopped()).toBeGreaterThan(0);
-      expect(screen.paid("/api/v1/stt/transcribe")).toHaveLength(1); expect(screen.host.requests).toHaveLength(1);
-      expect(screen.host.generations).toHaveLength(0); expect(screen.paid("/api/v1/tts/synthesize")).toHaveLength(0);
+      expect(screen.recognitions).toHaveLength(1); expect(screen.host.requests).toHaveLength(1);
+      expect(screen.host.generations).toHaveLength(0); expect(screen.speechCalls).toHaveLength(0);
       expect(screen.element<HTMLInputElement>("auto-speak").disabled).toBe(true);
       await screen.approve();
       expect(screen.host.generations).toHaveLength(1);
       expect(screen.host.generations[0].messages[1].content[0].text).toBe("What do you think?");
-      expect(screen.paid("/api/v1/tts/synthesize")).toHaveLength(1); expect(screen.playback()).toBe(1);
-      const body = JSON.parse(String(screen.paid("/api/v1/tts/synthesize")[0].input?.body));
-      expect(body).toEqual({ connectionId: "voice-a", text: "You have a calendar open.", voice: "warm", parameters: { speed: 1.1 } });
+      expect(screen.speechCalls).toHaveLength(1); expect(screen.playback()).toBe(1);
+      expect(screen.speechCalls[0]).toMatchObject({ input: { text: "You have a calendar open." }, options: { connectionId: "voice-a" } });
       screen.message(screen.host.sent.find((entry) => entry.payload.type === "complete")?.payload); await settle();
-      expect(screen.paid("/api/v1/tts/synthesize")).toHaveLength(1);
+      expect(screen.speechCalls).toHaveLength(1);
       expect(screen.host.sent.every((entry) => ["session-a", "session-b"].includes(entry.options?.frontendSessionId ?? "") && entry.userId === "user-a")).toBe(true);
     } finally { await screen.close(); }
   });
@@ -496,7 +630,7 @@ describe("configured widget share pipeline", () => {
     try {
       await screen.enable("auto-speak"); screen.element<HTMLButtonElement>("observe").click(); await settle();
       screen.element<HTMLButtonElement>("stop-speech").click(); await screen.approve();
-      expect(screen.host.generations).toHaveLength(1); expect(screen.paid("/api/v1/tts/synthesize")).toHaveLength(0);
+      expect(screen.host.generations).toHaveLength(1); expect(screen.speechCalls).toHaveLength(0);
       expect(screen.element("reply").textContent).toBe("You have a calendar open.");
     } finally { await screen.close(); }
   });
@@ -504,11 +638,11 @@ describe("configured widget share pipeline", () => {
     const transcription = deferred<Response>(); const screen = await widget({ stt: transcription.promise });
     try {
       await screen.enable("voice-input"); await screen.enable("auto-speak"); screen.element<HTMLButtonElement>("observe").click(); await settle();
-      expect(screen.paid("/api/v1/stt/transcribe")).toHaveLength(1);
+      expect(screen.recognitions).toHaveLength(1);
       screen.element<HTMLButtonElement>("cancel").click();
-      expect(screen.paid("/api/v1/stt/transcribe")[0].input?.signal?.aborted).toBe(true);
+      expect(screen.recognitions[0].options.signal?.aborted).toBe(true);
       transcription.resolve(Response.json({ text: "Too late" })); await settle();
-      expect(screen.host.requests).toHaveLength(0); expect(screen.host.generations).toHaveLength(0); expect(screen.paid("/api/v1/tts/synthesize")).toHaveLength(0);
+      expect(screen.host.requests).toHaveLength(0); expect(screen.host.generations).toHaveLength(0); expect(screen.speechCalls).toHaveLength(0);
       expect(screen.element<HTMLButtonElement>("observe").disabled).toBe(false);
     } finally { transcription.resolve(Response.json({ text: "Too late" })); await screen.close(); }
   });
@@ -520,20 +654,20 @@ describe("configured widget share pipeline", () => {
       expect(screen.element("status").textContent).toContain("Microphone access was declined");
     } finally { await screen.close(); }
   });
-  test("autoplay denial keeps audio controls available without retrying synthesis", async () => {
+  test("host playback failure keeps text and does not retry synthesis", async () => {
     const screen = await widget({ autoplayBlocked: true });
     try {
       await screen.enable("auto-speak"); screen.element<HTMLButtonElement>("observe").click(); await settle(); await screen.approve();
-      expect(screen.paid("/api/v1/tts/synthesize")).toHaveLength(1); expect(screen.element<HTMLAudioElement>("audio").hidden).toBe(false);
-      expect(screen.view.panel.querySelector("audio")).not.toBeNull();
-      expect(screen.element("speech-status").textContent).toContain("requires pressing Play");
+      expect(screen.speechCalls).toHaveLength(1); expect(screen.isSpeaking()).toBe(false);
+      expect(screen.view.panel.querySelector("audio")).toBeNull();
+      expect(screen.element("speech-status").textContent).toContain("Speech could not play");
     } finally { await screen.close(); }
   });
   test("TTS failure retains generated text without restarting generation", async () => {
     const screen = await widget({ tts: Promise.resolve(new Response("PRIVATE_PROVIDER_ERROR", { status: 502 })) });
     try {
       await screen.enable("auto-speak"); screen.element<HTMLButtonElement>("observe").click(); await settle(); await screen.approve();
-      expect(screen.host.generations).toHaveLength(1); expect(screen.paid("/api/v1/tts/synthesize")).toHaveLength(1);
+      expect(screen.host.generations).toHaveLength(1); expect(screen.speechCalls).toHaveLength(1);
       expect(screen.element("reply").textContent).toBe("You have a calendar open.");
       expect(screen.element("speech-status").textContent).not.toContain("PRIVATE_PROVIDER_ERROR");
     } finally { await screen.close(); }
@@ -543,10 +677,10 @@ describe("configured widget share pipeline", () => {
     try {
       await screen.enable("auto-speak"); screen.element<HTMLButtonElement>("observe").click(); await settle(); await screen.approve();
       screen.element<HTMLButtonElement>("clear").click();
-      expect(screen.paid("/api/v1/tts/synthesize")[0].input?.signal?.aborted).toBe(true);
+      expect(screen.speechCalls[0].stopped).toBe(true);
       synthesis.resolve(new Response("audio", { headers: { "Content-Type": "audio/wav" } })); await settle();
-      expect(screen.playback()).toBe(0); expect(screen.element<HTMLAudioElement>("audio").hidden).toBe(true);
-      expect(screen.element<HTMLAudioElement>("audio").hasAttribute("src")).toBe(false);
+      expect(screen.playback()).toBe(0); expect(screen.isSpeaking()).toBe(false);
+      expect(screen.view.panel.querySelector("audio")).toBeNull();
     } finally { synthesis.resolve(new Response()); await screen.close(); }
   });
 });

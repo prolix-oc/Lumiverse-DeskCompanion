@@ -10,8 +10,8 @@ export interface CompanionSettings {
   question: string;
   autoSpeak: boolean;
   voiceInput: boolean;
+  sttProvider: "connection" | "whistle" | "webspeech";
   sttId: string;
-  voiceSeconds: number;
   ttsId: string;
   voice: string;
   speed: number;
@@ -19,7 +19,7 @@ export interface CompanionSettings {
 
 export const DEFAULT_SETTINGS: Readonly<CompanionSettings> = Object.freeze({
   characterId: "", connectionId: "", deviceId: "", kind: "image", durationSeconds: 3,
-  question: "", autoSpeak: false, voiceInput: false, sttId: "", voiceSeconds: 5,
+  question: "", autoSpeak: false, voiceInput: false, sttProvider: "connection", sttId: "",
   ttsId: "", voice: "", speed: 1,
 });
 
@@ -62,18 +62,28 @@ export function parseSettingsPatch(value: unknown): Partial<CompanionSettings> |
       if (setting !== "" && !identifier(setting)) return null;
     } else if (key === "kind") {
       if (setting !== "image" && setting !== "video") return null;
+    } else if (key === "sttProvider") {
+      if (setting !== "connection" && setting !== "whistle" && setting !== "webspeech") return null;
     } else if (key === "autoSpeak" || key === "voiceInput") {
       if (typeof setting !== "boolean") return null;
     } else if (key === "question" || key === "voice") {
       if (typeof setting !== "string" || setting.length > (key === "question" ? MAX_QUESTION : 256)) return null;
     } else if (typeof setting !== "number" || !Number.isFinite(setting)
-      || (key === "speed" ? setting < 0.25 || setting > 4 : !Number.isInteger(setting) || setting < 1 || setting > (key === "voiceSeconds" ? 15 : 30))) return null;
+      || (key === "speed" ? setting < 0.25 || setting > 4 : !Number.isInteger(setting) || setting < 1 || setting > 30)) return null;
     patch[key] = setting;
   }
   return patch;
 }
 
 export function parseSettings(value: unknown): CompanionSettings | null {
-  const patch = parseSettingsPatch(value);
+  // Retire the timed recorder setting while preserving existing opt-ins and provider choices.
+  if (!record(value)) return null;
+  const normalized = { ...value };
+  if (Object.hasOwn(normalized, "voiceSeconds")) {
+    if (!Number.isInteger(normalized.voiceSeconds) || Number(normalized.voiceSeconds) < 1 || Number(normalized.voiceSeconds) > 15) return null;
+    delete normalized.voiceSeconds;
+  }
+  if (!Object.hasOwn(normalized, "sttProvider")) normalized.sttProvider = "connection";
+  const patch = parseSettingsPatch(normalized);
   return patch && Object.keys(patch).length === Object.keys(DEFAULT_SETTINGS).length ? { ...DEFAULT_SETTINGS, ...patch } : null;
 }

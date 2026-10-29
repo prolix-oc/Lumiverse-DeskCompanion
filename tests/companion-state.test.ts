@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { installCompanion } from "../src/worker";
 import { SETTINGS_PATH } from "../src/companion-state";
 import { CHANNEL } from "../src/protocol";
-import { DEFAULT_SETTINGS, parseSettingsPatch } from "../src/settings";
+import { DEFAULT_SETTINGS, parseSettings, parseSettingsPatch } from "../src/settings";
 import { deferred, fixture, settle } from "./fixtures";
 
 const READY_SETTINGS = { ...DEFAULT_SETTINGS, characterId: "character-a", connectionId: "model-a", deviceId: "desktop-a" };
@@ -16,10 +16,19 @@ function client(host: ReturnType<typeof fixture>, clientId: string, sessionId: s
 describe("authoritative companion state", () => {
   test("bounds settings and refuses unexpected paths, identities, and switches", () => {
     for (const patch of [{ userId: "user-b" }, { path: "../secret" }, { autoSpeak: "true" }, { voiceSeconds: 16 },
-      { durationSeconds: 31 }, { question: "x".repeat(1201) }, { speed: Number.NaN }, { deviceId: "../desktop" }, {}]) {
+      { durationSeconds: 31 }, { question: "x".repeat(1201) }, { speed: Number.NaN }, { deviceId: "../desktop" }, { sttProvider: "unknown" }, {}]) {
       expect(parseSettingsPatch(patch)).toBeNull();
     }
     expect(parseSettingsPatch({ autoSpeak: false, voiceInput: false, question: "" })).not.toBeNull();
+  });
+
+  test("migrates existing connection preferences without resetting opted-in workflow settings", () => {
+    const { sttProvider: _, ...legacy } = { ...READY_SETTINGS, sttId: "stt-a", voiceInput: true, autoSpeak: true };
+    expect(parseSettings(legacy)).toEqual({ ...legacy, sttProvider: "connection" });
+    expect(parseSettings({ ...legacy, voiceSeconds: 5 })).toEqual({ ...legacy, sttProvider: "connection" });
+    expect(parseSettings({ ...legacy, voiceSeconds: 100 })).toBeNull();
+    expect(parseSettings({ ...legacy, sttProvider: "whistle" })?.sttProvider).toBe("whistle");
+    expect(parseSettings({ voiceInput: true })).toBeNull();
   });
 
   test("synchronizes settings only to registered documents belonging to the authenticated user", async () => {

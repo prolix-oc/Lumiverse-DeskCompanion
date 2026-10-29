@@ -1,11 +1,11 @@
-import type { DesktopCaptureApprovalStatus, SpindleFrontendContext } from "lumiverse-spindle-types";
+import type { DesktopCaptureApprovalStatus, SpindleFrontendContext, SpindleSTTProviderOption } from "lumiverse-spindle-types";
 import { CHANNEL, CHARACTER_PAGE_SIZE, MAX_QUESTION, REQUIRED_PERMISSIONS, createMessageId, record } from "./protocol";
 import type { Catalog, CharacterOption, ClientMessage, DeviceOption, ServerMessage, VoiceRef } from "./protocol";
 import { CAPTURE_PENDING, CAPTURE_READY } from "./capture-flow";
-import { MAX_SPEECH_CHARS, listSpeechConnections, synthesizeReply } from "./speech";
+import { MAX_SPEECH_CHARS, listSpeechConnections, speakReply, speechAPI } from "./speech";
 import type { SpeechConnection } from "./speech";
-import { listTranscriptionConnections, supportsVoiceInput } from "./speech-input";
-import type { TranscriptionConnection } from "./speech-input";
+import { listTranscriptionConnections, recognizeQuestion, speechInputAPI, transcriptionProviders } from "./speech-input";
+import type { TranscriptionConnection, TranscriptionProvider } from "./speech-input";
 import { AutomaticShareSpeech, prepareShareQuestion } from "./share-workflow";
 import { DEFAULT_SETTINGS, parseSettingsPatch } from "./settings";
 import type { CompanionSettings, CompanionSnapshot } from "./settings";
@@ -36,8 +36,10 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     <details open><summary>Share workflow</summary>
       <label class="dc-option"><input data-role="auto-speak" type="checkbox"> Speak the character's reply automatically after an approved share</label>
       <label class="dc-option"><input data-role="voice-input" type="checkbox"> Include a spoken question with each share</label>
-      <div data-role="voice-options" hidden><label class="dc-field">STT connection<select data-role="stt" aria-label="STT connection"><option value="">Choose an STT connection</option></select></label>
-        <label class="dc-field">Listen for seconds<input data-role="voice-seconds" aria-label="Voice input duration" type="number" min="1" max="15" step="1" value="5"></label></div>
+      <div data-role="voice-options" hidden><label class="dc-field">STT provider<select data-role="stt-provider" aria-label="STT provider"><option value="connection">STT connection</option><option value="whistle">Whistle (on this device)</option><option value="webspeech">Web Speech</option></select></label>
+        <label class="dc-field" data-role="stt-connection">STT connection<select data-role="stt" aria-label="STT connection"><option value="">Choose an STT connection</option></select></label>
+        <p class="dc-note" data-role="stt-guidance"></p>
+        <p class="dc-note">Speak naturally. Listening ends after speech followed by silence; Cancel discards the question.</p></div>
       <p class="dc-note" data-role="workflow-summary">Share → character reaction. Voice input and automatic speech are off.</p>
       <p class="dc-note" data-role="input-status" role="status"></p>
     </details>
@@ -49,13 +51,13 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     </details>
     <details data-role="speech-options"><summary>Character voice · text-to-speech</summary>
       <label class="dc-field">TTS connection<select data-role="tts" aria-label="TTS connection"><option value="">Choose a TTS connection</option></select></label>
-      <div class="dc-row"><label class="dc-field">Voice ID (blank = connection default)<input data-role="voice" aria-label="Voice ID" maxlength="256" placeholder="Connection default"></label><label class="dc-field" style="max-width:80px">Speed<input data-role="speed" aria-label="Speech speed" type="number" value="1" min="0.25" max="4" step="0.05"></label></div>
-      <div class="dc-row"><button data-role="character-voice" type="button">Use character voice</button></div>
-      <p class="dc-note">Speech sends reply text to the selected TTS provider. Enable automatic speech above to run it after each approved share; otherwise use Speak reply. Capture pixels and videos never enter this widget.</p>
+      <div class="dc-row"><button data-role="character-voice" type="button">Use character's TTS connection</button></div>
+      <p class="dc-note">Lumiverse speaks reply text using this connection's default voice and your Voice &amp; Speech playback settings. Configure voice and speed there. Enable automatic speech above, or use Speak reply.</p>
+      <p class="dc-note" data-role="tts-guidance"></p>
     </details>
     <footer class="dc-footer"><span data-role="sync-status">Connecting to companion settings…</span><div class="dc-row"><button data-role="refresh" type="button">Refresh</button><button data-role="grant" type="button">Permissions</button></div></footer>
     <div class="dc-row"><button data-role="cancel" type="button" hidden>Cancel request</button><button data-role="stop-speech" type="button" hidden>Stop speech</button></div>
-    <div class="dc-note" data-role="speech-status" role="status" aria-live="polite"></div><audio data-role="audio" controls preload="none" hidden></audio>
+    <div class="dc-note" data-role="speech-status" role="status" aria-live="polite"></div>
     </div>
     <div data-view="triggers">
       <div class="dc-destination" data-role="widget-summary">Configure your companion in the Desk Companion sidebar.</div>
@@ -64,7 +66,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
       <div class="dc-row dc-actions"><button class="dc-primary" data-role="observe" type="button" disabled>Look at my screen</button><button data-role="cancel" type="button" disabled>Cancel request</button></div>
       <div class="dc-reply"><div class="dc-reply-name" data-role="speaker">A fresh perspective</div><div class="dc-reply-text" data-role="reply">Your character's response appears here. Replies stay in companion memory, not chat history.</div></div>
       <div class="dc-row"><button data-role="speak" type="button" disabled>Speak reply</button><button data-role="stop-speech" type="button">Stop speech</button><button data-role="clear" type="button">Clear</button></div>
-      <div class="dc-note" data-role="speech-status" role="status" aria-live="polite"></div><audio data-role="audio" controls preload="none" hidden></audio>
+      <div class="dc-note" data-role="speech-status" role="status" aria-live="polite"></div>
       <footer class="dc-footer"><span>One request. One approved capture.</span><button data-role="settings" type="button">Settings</button></footer>
     </div>
     <div class="dc-status" data-role="status" role="status" aria-live="polite">Connecting to the companion…</div>`;
@@ -87,13 +89,13 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
   const duration = element<HTMLInputElement>("duration");
   const question = element<HTMLTextAreaElement>("question");
   const tts = element<HTMLSelectElement>("tts");
-  const voice = element<HTMLInputElement>("voice");
-  const speed = element<HTMLInputElement>("speed");
-  const audio = element<HTMLAudioElement>("audio");
+  const outputAPI = speechAPI(ctx);
   const autoSpeak = element<HTMLInputElement>("auto-speak");
   const voiceInput = element<HTMLInputElement>("voice-input");
   const stt = element<HTMLSelectElement>("stt");
-  const voiceSeconds = element<HTMLInputElement>("voice-seconds");
+  const sttProvider = element<HTMLSelectElement>("stt-provider");
+  const inputAPI = speechInputAPI(ctx);
+  let inputProviders: SpindleSTTProviderOption[] = [];
   const status = element("status");
   const reply = element("reply");
   const badge = element("badge");
@@ -119,9 +121,9 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
   let speechConnections: SpeechConnection[] = [];
   let transcriptionConnections: TranscriptionConnection[] = [];
   let inputController: AbortController | null = null;
+  let inputMessage = "";
   const automaticSpeech = new AutomaticShareSpeech();
   let speechController: AbortController | null = null;
-  let audioUrl: string | null = null;
   let snapshot: CompanionSnapshot | null = null;
   let pendingPatch: Partial<CompanionSettings> = {};
   let saving: { id: string; patch: Partial<CompanionSettings> } | null = null;
@@ -187,8 +189,8 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
   const settingsControls: Array<{ key: keyof CompanionSettings; control: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement }> = [
     { key: "characterId", control: character }, { key: "connectionId", control: connection }, { key: "deviceId", control: device },
     { key: "kind", control: kind }, { key: "durationSeconds", control: duration }, { key: "question", control: question },
-    { key: "autoSpeak", control: autoSpeak }, { key: "voiceInput", control: voiceInput }, { key: "sttId", control: stt },
-    { key: "voiceSeconds", control: voiceSeconds }, { key: "ttsId", control: tts }, { key: "voice", control: voice }, { key: "speed", control: speed },
+    { key: "autoSpeak", control: autoSpeak }, { key: "voiceInput", control: voiceInput }, { key: "sttProvider", control: sttProvider }, { key: "sttId", control: stt },
+    { key: "ttsId", control: tts },
   ];
 
   function applySettings(): void {
@@ -265,11 +267,11 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
   function applyCharacterVoice(): void {
     const chosen = surface === "settings" ? selectedCharacter()?.voice : completedVoice ?? selectedCharacter()?.voice;
     if (chosen && speechConnections.some((entry) => entry.id === chosen.connectionId)) {
-      tts.value = chosen.connectionId; voice.value = chosen.voice; speed.value = String(chosen.speed ?? 1);
-      queueSettings({ ttsId: tts.value, voice: voice.value, speed: Number(speed.value) });
-      element("speech-status").textContent = "Using the character's configured voice. You can override it here.";
+      tts.value = chosen.connectionId;
+      queueSettings({ ttsId: tts.value });
+      element("speech-status").textContent = "Using the character's TTS connection with its default voice and your Lumiverse playback settings.";
     } else {
-      element("speech-status").textContent = "No accessible character voice is configured. Choose a TTS connection and optional voice ID.";
+      element("speech-status").textContent = "No accessible character TTS connection is configured. Choose a TTS connection.";
     }
     updateControls();
   }
@@ -277,6 +279,16 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
   function initializeCharacterVoice(): void {
     if (!initializeVoice || surface !== "settings" || !selectedCharacter() || !speechConnections.length) return;
     initializeVoice = false; applyCharacterVoice();
+  }
+
+  function discoverInputProviders(): void {
+    try { inputProviders = transcriptionProviders(inputAPI); }
+    catch { inputProviders = []; }
+    for (const option of sttProvider.options) {
+      const provider = inputProviders.find((entry) => entry.id === option.value);
+      option.disabled = !provider || !provider.available && !(provider.id === "connection" && provider.unavailableReason === "connectionRequired");
+      option.textContent = `${provider?.name ?? (option.value === "whistle" ? "Whistle (on this device)" : option.value === "webspeech" ? "Web Speech" : "STT connection")}${option.disabled ? " · unavailable" : ""}`;
+    }
   }
 
   function updateControls(): void {
@@ -289,13 +301,24 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
       .every((permission) => granted.includes(permission)) && (!video || granted.includes("screen_recording"));
     const supported = video ? chosenConnection?.video && chosenDevice?.video : chosenConnection?.image && chosenDevice?.image;
     const validDuration = Number.isInteger(Number(duration.value)) && Number(duration.value) >= 1 && Number(duration.value) <= 30;
-    const validVoice = speechConnections.some((entry) => entry.id === tts.value) && Number.isFinite(Number(speed.value))
-      && Number(speed.value) >= 0.25 && Number(speed.value) <= 4 && voice.value.length <= 256;
-    const validInput = supportsVoiceInput() && transcriptionConnections.some((entry) => entry.id === stt.value)
-      && Number.isInteger(Number(voiceSeconds.value)) && Number(voiceSeconds.value) >= 1 && Number(voiceSeconds.value) <= 15;
-    for (const control of [character, connection, device, kind, question, tts, voice, speed, autoSpeak, stt, voiceSeconds]) control.disabled = busy;
-    voiceInput.disabled = busy || !supportsVoiceInput();
+    const validVoice = Boolean(outputAPI) && granted.includes("media") && speechConnections.some((entry) => entry.id === tts.value);
+    const provider = inputProviders.find((entry) => entry.id === sttProvider.value);
+    const connectionInput = sttProvider.value === "connection";
+    const providerReady = provider?.available || connectionInput && provider?.unavailableReason === "connectionRequired";
+    const validInput = Boolean(providerReady) && Boolean(inputAPI) && granted.includes("media")
+      && (!connectionInput || transcriptionConnections.some((entry) => entry.id === stt.value));
+    for (const control of [character, connection, device, kind, question, tts, autoSpeak, sttProvider, stt]) control.disabled = busy;
+    voiceInput.disabled = busy || !inputAPI;
     element("voice-options").hidden = !voiceInput.checked;
+    element("stt-connection").hidden = !connectionInput;
+    element("tts-guidance").textContent = !outputAPI ? "Update Lumiverse to use speech playback through Spindle. Sharing without speech is still available."
+      : !granted.includes("media") ? "Use Permissions to grant Media for speech playback." : "Playback uses Lumiverse's audio controls. Stop speech also stops the host playback in this document.";
+    element("stt-guidance").textContent = inputAPI && !granted.includes("media") ? "Use Permissions to grant Media for voice input. Screen sharing without voice input is still available."
+      : !providerReady ? provider?.unavailableReason === "hostUpdate" ? "Update Lumiverse to use speech recognition through Spindle."
+        : "This STT provider is unavailable in this window. Check Voice & Speech settings or choose another provider."
+      : connectionInput ? "Microphone audio is sent to the selected STT connection."
+        : sttProvider.value === "whistle" ? "Whistle transcribes on this device using Lumiverse's shared model. No API key is needed; the model may load on first use."
+          : "Recognition uses the host's speech engine. Processing location depends on your browser or device.";
     duration.disabled = busy || !video;
     const needsSettings = !hasGrants || !supported || !character.value || !current.characterId || !current.connectionId || !current.deviceId
       || character.value !== current.characterId || connection.value !== current.connectionId || device.value !== current.deviceId
@@ -338,10 +361,12 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     element("capture-readiness").hidden = busy;
     const destination = element("destination");
     destination.textContent = chosenConnection ? `${chosenConnection.provider} · ${chosenConnection.model} · ${chosenDevice?.name ?? "choose a desktop"}${supported ? "" : " · media not supported"}` : "Choose the model destination before requesting a capture.";
-    const inputDestination = transcriptionConnections.find((entry) => entry.id === stt.value);
+    const inputDestination = connectionInput ? transcriptionConnections.find((entry) => entry.id === stt.value) : provider;
     const speechDestination = speechConnections.find((entry) => entry.id === tts.value);
-    element("workflow-summary").textContent = `${voiceInput.checked ? `Listen ${voiceSeconds.value}s → ${inputDestination?.name ?? "choose STT"} → ` : ""}Approved share → character reaction${autoSpeak.checked ? ` → ${speechDestination?.name ?? "choose TTS below"}` : " (text only)"}.`
-      + (voiceInput.checked ? " Microphone audio is sent to the STT provider before screen capture; no background listening." : " Voice input is off.");
+    element("workflow-summary").textContent = `${voiceInput.checked ? `Speak until silence → ${inputDestination?.name ?? "choose STT"} → ` : ""}Approved share → character reaction${autoSpeak.checked ? ` → ${speechDestination?.name ?? "choose TTS below"}` : " (text only)"}.`
+      + (voiceInput.checked ? connectionInput ? " Microphone audio goes to the selected STT connection before screen capture; no background listening."
+        : sttProvider.value === "whistle" ? " Whistle transcribes microphone audio on this device before screen capture; no background listening."
+          : " The host's speech engine transcribes your question before screen capture; no background listening." : " Voice input is off.");
     element("widget-summary").textContent = `${selectedCharacter()?.name ?? "Choose a character in the sidebar"} · ${video ? `Video ${duration.value}s` : "Screenshot"}\n${destination.textContent}\n${element("workflow-summary").textContent}`;
     element("sync-status").textContent = !snapshot ? "Connecting to companion settings…" : saving || Object.keys(pendingPatch).length
       ? "Saving settings…" : "Settings synchronized across companion windows.";
@@ -352,8 +377,6 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     if (element("speech-status").dataset.shared === "true") element("speech-status").textContent = "";
     element("speech-status").dataset.shared = "false";
     speechController?.abort(); speechController = null;
-    audio.pause(); audio.removeAttribute("src"); audio.load(); audio.hidden = true;
-    if (audioUrl) { URL.revokeObjectURL(audioUrl); audioUrl = null; }
     if (!disposed && snapshot?.activity.requestId) send({ type: "speech-stage", targetId: snapshot.activity.requestId, stage: "idle" });
     updateControls();
   }
@@ -384,6 +407,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
 
   function refresh(page = catalog?.page ?? 0): void {
     if (disposed || catalogId || devicesId) return;
+    discoverInputProviders();
     if (!REQUIRED_PERMISSIONS.filter((permission) => permission !== "screen_capture").every((permission) => granted.includes(permission))
       || (!granted.includes("screen_capture") && !granted.includes("screen_recording"))) {
       notice("Grant UI Panels, Characters, Generation, and at least one capture permission using Permissions."); return;
@@ -419,16 +443,14 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     if (snapshot?.activity.requestId) send({ type: "speech-stage", targetId: snapshot.activity.requestId, stage: "synthesizing" });
     updateControls();
     try {
-      const blob = await synthesizeReply(completedText, selectedVoice ?? { connectionId: tts.value, voice: voice.value, speed: Number(speed.value) }, controller.signal);
-      if (disposed || controller.signal.aborted || speechController !== controller) return;
-      audioUrl = URL.createObjectURL(blob); audio.src = audioUrl; audio.hidden = false;
-      if (snapshot?.activity.requestId) send({ type: "speech-stage", targetId: snapshot.activity.requestId, stage: "ready" });
-      try {
-        await audio.play();
-        if (!disposed && !controller.signal.aborted && snapshot?.activity.requestId) send({ type: "speech-stage", targetId: snapshot.activity.requestId, stage: "playing" });
-        if (!disposed && speechController === controller) element("speech-status").textContent = "Speaking. Use the player to pause or replay.";
-      } catch {
-        if (!disposed && speechController === controller) element("speech-status").textContent = "Audio is ready. Your browser requires pressing Play in the audio controls.";
+      await speakReply(completedText, (selectedVoice ?? { connectionId: tts.value }).connectionId, controller.signal, outputAPI, (speaking) => {
+        if (disposed || controller.signal.aborted || speechController !== controller) return;
+        if (snapshot?.activity.requestId) send({ type: "speech-stage", targetId: snapshot.activity.requestId, stage: speaking ? "playing" : "idle" });
+        element("speech-status").textContent = speaking ? "Preparing or playing through Lumiverse. Use Stop speech or the host's audio controls." : "Speech finished.";
+      });
+      if (!disposed && !controller.signal.aborted && speechController === controller) {
+        element("speech-status").textContent = "Speech finished.";
+        if (snapshot?.activity.requestId) send({ type: "speech-stage", targetId: snapshot.activity.requestId, stage: "idle" });
       }
     } catch (error) {
       if (!disposed && snapshot?.activity.requestId) send({ type: "speech-stage", targetId: snapshot.activity.requestId, stage: "idle" });
@@ -496,7 +518,8 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
       completedVoice = incoming.activity.voice;
       reply.textContent = incoming.activity.text || "Your character's response appears here. Nothing is saved to chat history.";
       element("speaker").textContent = incoming.activity.characterName;
-      notice(incoming.activity.message, incoming.activity.error);
+      notice(inputController && incoming.activity.ownerClientId === clientId && inputMessage && !incoming.activity.error
+        ? inputMessage : incoming.activity.message, incoming.activity.error);
       if (incoming.activity.speechClientId !== clientId && incoming.activity.speechStage !== "idle") {
         element("speech-status").textContent = `${incoming.activity.speechStage === "playing" ? "Speaking" : incoming.activity.speechStage === "ready" ? "Audio is ready" : "Synthesizing speech"} in another companion window.`;
         element("speech-status").dataset.shared = "true";
@@ -569,7 +592,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
   async function share(trigger: { shortcut?: boolean; skipVoice?: boolean } = {}): Promise<void> {
     if (!(trigger.skipVoice ? canQuickShare : canShare) || surface !== "widget" && !trigger.shortcut) return;
     send({ type: "subscribe", surface });
-    const selectedVoice = autoSpeak.checked ? { connectionId: tts.value, voice: voice.value, speed: Number(speed.value) } : null;
+    const selectedVoice = autoSpeak.checked ? { connectionId: tts.value, voice: "" } : null;
     const requestId = createMessageId();
     stopSpeech();
     automaticSpeech.arm(requestId, selectedVoice);
@@ -577,13 +600,15 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     const request = { type: "observe" as const, characterId: character.value, connectionId: connection.value, deviceId: device.value,
       kind: kind.value as "image" | "video", durationSeconds: Number(duration.value), question: question.value };
     const includeVoice = voiceInput.checked && !trigger.skipVoice;
+    const inputProvider = sttProvider.value as TranscriptionProvider;
     const controller = new AbortController(); inputController = controller;
+    inputMessage = "";
     const timer = window.setTimeout(() => controller.abort(), 60000);
     let dispatched = false;
     let failureMessage = "Share stopped before requesting screen capture.";
     updateControls();
     try {
-      await new Promise<void>((resolve, reject) => {
+      const reservation = new Promise<void>((resolve, reject) => {
         let settled = false;
         const abort = () => finish(new Error("Share cancelled."));
         const reservationTimer = window.setTimeout(() => finish(new Error("The companion did not synchronize. Refresh before sharing.")), 10000);
@@ -598,16 +623,29 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
         pendingBegin = { id: requestId, resolve: () => finish(), reject: (error) => finish(error) };
         send({ type: "begin-share", revision: snapshot!.revision }, requestId);
       });
+      void reservation.catch(() => {});
+      const beginInput = () => {
+        stage = "listening";
+        inputMessage = "Speak naturally. Listening ends after speech followed by silence. Microphone access may prompt for permission.";
+        notice(inputMessage); updateControls();
+        return prepareShareQuestion(request.question, recognizeQuestion(inputProvider, stt.value, controller.signal, inputAPI, (status) => {
+          if (disposed || controller.signal.aborted || inputController !== controller) return;
+          stage = status.phase === "processing" ? "transcribing" : "listening";
+          send({ type: "input-stage", targetId: requestId, stage: stage as "listening" | "transcribing" });
+          inputMessage = status.phase === "loading" ? `Loading ${inputProvider === "whistle" ? "Whistle on this device" : "speech recognition"}${typeof status.progress === "number" ? ` · ${Math.round(Math.max(0, Math.min(1, status.progress)) * 100)}%` : ""}…`
+            : status.phase === "processing" ? "Microphone stopped. Transcribing your question before requesting screen capture…"
+              : "Speak naturally. Pause when you finish; listening stops automatically.";
+          notice(inputMessage); updateControls();
+        }), controller.signal);
+      };
+      // Button presses start in the gesture before awaiting the worker. Shortcuts
+      // already arrive asynchronously, so retain their reservation-before-input check.
+      const questionReady = includeVoice && !trigger.shortcut ? beginInput() : null;
+      void questionReady?.catch(() => {});
+      await reservation;
       if (disposed || controller.signal.aborted) return;
       clearReply(false);
-      if (includeVoice) request.question = await prepareShareQuestion(request.question,
-        { connectionId: stt.value, seconds: Number(voiceSeconds.value) }, controller.signal, (inputStage) => {
-          stage = inputStage;
-          send({ type: "input-stage", targetId: requestId, stage: inputStage });
-          notice(inputStage === "listening" ? `Speak now. Listening for ${voiceSeconds.value} seconds, then transcribing automatically. Microphone access may prompt for permission.`
-            : "Microphone stopped. Transcribing your question before requesting screen capture…");
-          updateControls();
-        });
+      if (includeVoice) request.question = await (questionReady ?? beginInput());
       if (disposed || controller.signal.aborted) return;
       if (includeVoice) element("input-status").textContent = `Included question: ${request.question}`;
       inputController = null; stage = "checking";
@@ -617,6 +655,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
       automaticSpeech.cancel();
       failureMessage = controller.signal.aborted ? "Share cancelled or voice input timed out. Nothing was requested from a model."
         : error instanceof Error ? error.message : "Voice input could not finish; no screen capture was requested.";
+      controller.abort();
       if (!disposed) { stage = "idle"; notice(failureMessage, true); }
     } finally {
       window.clearTimeout(timer);
@@ -637,18 +676,17 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
   listen(element("previous"), "click", () => refresh(Math.max(0, (catalog?.page ?? 0) - 1)));
   listen(element("next"), "click", () => refresh((catalog?.page ?? 0) + 1));
   listen(element("speak"), "click", () => { void speak(); });
-  listen(audio, "ended", () => { if (snapshot?.activity.requestId) send({ type: "speech-stage", targetId: snapshot.activity.requestId, stage: "idle" }); });
   listen(element("stop-speech"), "click", () => { automaticSpeech.cancel(); stopSpeech(); send({ type: "stop-speech" }); element("speech-status").textContent = "Speech stopped; pending automatic speech is disabled for this share."; });
   listen(element("settings"), "click", () => { options.openSettings ? options.openSettings() : send({ type: "open-settings" }); });
   listen(element("character-voice"), "click", applyCharacterVoice);
   listen(character, "change", () => { queueSettings({ characterId: character.value }); clearReply(); applyCharacterVoice(); });
   for (const { key, control } of settingsControls) listen(control, "input", () => {
     const value = key === "autoSpeak" || key === "voiceInput" ? (control as HTMLInputElement).checked
-      : ["durationSeconds", "voiceSeconds", "speed"].includes(key) ? Number(control.value) : control.value;
+      : ["durationSeconds"].includes(key) ? Number(control.value) : control.value;
     queueSettings({ [key]: value }); updateControls();
   });
   listen(element("grant"), "click", () => {
-    void ctx.permissions.request([...REQUIRED_PERMISSIONS, "screen_recording"], { reason: "Desk Companion needs grants to select a character, request desktop capture with native approval, and ask your chosen model. Desktop can remember your source and approval." })
+    void ctx.permissions.request([...REQUIRED_PERMISSIONS, "screen_recording", "media"], { reason: "Desk Companion uses Media for optional voice input and playback, plus grants to select a character, request desktop capture with native approval, and ask your chosen model." })
       .then((permissions) => { if (!disposed) { granted = permissions; refresh(); updateControls(); } })
       .catch(() => { if (!disposed) notice("Permission request was declined. An administrator/owner must approve capture grants.", true); });
   });
@@ -662,7 +700,7 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
   void ctx.permissions.getGranted().then((permissions) => { if (!disposed) { granted = permissions; send({ type: "subscribe", surface }); updateControls(); } })
     .catch(() => { if (!disposed) notice("Cannot read grants. Check the extension's permissions.", true); });
   const listingTimeout = window.setTimeout(() => listingController.abort(), 15000);
-  const speechListing = listSpeechConnections(listingController.signal).then((connections) => {
+  const speechListing = listSpeechConnections(ctx, listingController.signal).then((connections) => {
     if (disposed) return;
     speechConnections = connections;
     fill(tts, connections.map((entry) => ({ id: entry.id, label: `${entry.name} · ${entry.provider}` })), "Choose a TTS connection", settings().ttsId);
@@ -670,25 +708,27 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     initializeCharacterVoice();
     updateControls();
   }).catch(() => { if (!disposed) element("speech-status").textContent = "Configure a TTS connection in Voice settings, then reopen the widget. Observation still works without speech."; });
-  const inputListing = listTranscriptionConnections(listingController.signal).then((connections) => {
+  discoverInputProviders();
+  const inputListing = listTranscriptionConnections(ctx, listingController.signal).then((connections) => {
     if (disposed) return;
     transcriptionConnections = connections;
     fill(stt, connections.map((entry) => ({ id: entry.id, label: `${entry.name} · ${entry.provider}` })), "Choose an STT connection", settings().sttId);
     chooseDefaults();
-    if (!supportsVoiceInput()) element("input-status").textContent = "Voice recording is unavailable in this window. Use a secure browser/desktop window with microphone support, or type your question.";
     updateControls();
-  }).catch(() => { if (!disposed) element("input-status").textContent = "Configure an STT connection in Voice settings, then reopen the widget. Screen sharing works without voice input."; });
+  }).catch(() => { if (!disposed) element("input-status").textContent = "STT connections could not be listed. Whistle can still be selected when available; reopen the companion to retry connections."; });
   void Promise.allSettled([speechListing, inputListing]).finally(() => window.clearTimeout(listingTimeout));
-  const resynchronize = () => { if (!disposed && document.visibilityState !== "hidden") { send({ type: "subscribe", surface }); refresh(); } };
+  const resynchronize = () => { if (!disposed && document.visibilityState !== "hidden") { discoverInputProviders(); send({ type: "subscribe", surface }); refresh(); updateControls(); } };
   window.addEventListener("pageshow", resynchronize);
   window.addEventListener("online", resynchronize);
   document.addEventListener("visibilitychange", resynchronize);
   window.addEventListener("focus", discoverDevices);
+  const refreshInputProviders = () => { if (!disposed) { discoverInputProviders(); updateControls(); } };
+  window.addEventListener("focus", refreshInputProviders);
   // Discovery only: never request a capture, input, generation, or speech here.
   let discoveryTimer: number;
   const pollDevices = () => { discoverDevices(); discoveryTimer = window.setTimeout(pollDevices, 10000); };
   discoveryTimer = window.setTimeout(pollDevices, 10000);
-  cleanups.push(() => { window.removeEventListener("pageshow", resynchronize); window.removeEventListener("online", resynchronize); document.removeEventListener("visibilitychange", resynchronize); window.removeEventListener("focus", discoverDevices); window.clearTimeout(discoveryTimer); });
+  cleanups.push(() => { window.removeEventListener("pageshow", resynchronize); window.removeEventListener("online", resynchronize); document.removeEventListener("visibilitychange", resynchronize); window.removeEventListener("focus", discoverDevices); window.removeEventListener("focus", refreshInputProviders); window.clearTimeout(discoveryTimer); });
   updateControls();
 
   return { panel, dispose: () => {

@@ -1,67 +1,48 @@
 import { describe, expect, test } from "bun:test";
-import { MAX_SPEECH_CHARS, boundedBytes, listSpeechConnections, synthesizeReply } from "../src/speech";
+import type { SpindleFrontendContext, SpindleTTSAPI } from "lumiverse-spindle-types";
+import { MAX_SPEECH_CHARS, listSpeechConnections, speakReply } from "../src/speech";
+import { deferred, settle } from "./fixtures";
 
-describe("authenticated TTS adapter", () => {
-  test("uses the existing same-origin TTS API with no tokens or capture handles", async () => {
-    let captured: { url: string; options?: RequestInit } | null = null;
-    const request = (async (url: string | URL | Request, options?: RequestInit) => {
-      captured = { url: String(url), options };
-      return new Response(new Uint8Array([1, 2, 3]), { headers: { "Content-Type": "audio/wav" } });
-    }) as typeof fetch;
-    const blob = await synthesizeReply("Hello from Mira.", { connectionId: "voice-a", voice: "warm", speed: 1.1 }, new AbortController().signal, request);
-    const call = captured! as { url: string; options?: RequestInit };
-    expect(call.url).toBe("/api/v1/tts/synthesize"); expect(call.options?.credentials).toBe("same-origin"); expect(call.options?.redirect).toBe("error");
-    expect(JSON.parse(String(call.options?.body))).toEqual({ connectionId: "voice-a", text: "Hello from Mira.", voice: "warm", parameters: { speed: 1.1 } });
-    expect(blob.type).toBe("audio/wav"); expect(blob.size).toBe(3);
-    expect(JSON.stringify(call)).not.toContain("assetId"); expect(JSON.stringify(call)).not.toContain("Authorization");
+describe("Spindle TTS playback", () => {
+  test("speaks text through the host with the selected connection", async () => {
+    const calls: unknown[] = []; let removed = 0;
+    const api = { async speak(input: unknown, options: unknown) { calls.push({ input, options }); },
+      subscribe: () => () => { removed += 1; } } as unknown as SpindleTTSAPI;
+    await speakReply("Hello from Mira.", "voice-a", new AbortController().signal, api);
+    expect(calls).toEqual([{ input: { text: "Hello from Mira." }, options: { connectionId: "voice-a" } }]);
+    expect(removed).toBe(1);
   });
-  test("projects a safe connection list without provider metadata or keys", async () => {
-    const request = (async () => Response.json({ data: [{ id: "voice-a", name: "My voice", provider: "google", voice: "warm", api_key: "SECRET", metadata: { secret: "SECRET" } }] })) as typeof fetch;
-    const connections = await listSpeechConnections(new AbortController().signal, request);
-    expect(connections).toEqual([{ id: "voice-a", name: "My voice", provider: "google", voice: "warm" }]);
-    expect(JSON.stringify(connections)).not.toContain("SECRET");
+  test("projects credential-free TTS summaries and gates old hosts", async () => {
+    const kinds: string[] = [];
+    const ctx = { host: { capabilities: { "connection-kinds-v1": 1 } }, connections: { async list({ kind }: { kind: string }) {
+      kinds.push(kind); return [{ id: "voice-a", kind: "tts", name: "My voice", provider: "google", voice: "warm", api_key: "SECRET" }];
+    } } } as unknown as SpindleFrontendContext;
+    expect(await listSpeechConnections(ctx, new AbortController().signal)).toEqual([{ id: "voice-a", name: "My voice", provider: "google", voice: "warm" }]);
+    expect(kinds).toEqual(["tts"]);
+    ctx.host.capabilities["connection-kinds-v1"] = 0;
+    await expect(listSpeechConnections(ctx, new AbortController().signal)).rejects.toThrow("Update Lumiverse");
+    expect(kinds).toHaveLength(1);
   });
-  test("rejects overlong text before making a billable request", async () => {
-    let calls = 0; const request = (async () => { calls += 1; return new Response(); }) as typeof fetch;
-    await expect(synthesizeReply("x".repeat(MAX_SPEECH_CHARS + 1), { connectionId: "voice-a", voice: "" }, new AbortController().signal, request)).rejects.toThrow();
-    expect(calls).toBe(0);
-  });
-  test("does not render provider error bodies and rejects non-audio responses", async () => {
-    for (const response of [new Response("SECRET", { status: 502 }), new Response("<script>evil</script>", { headers: { "Content-Type": "text/html" } })]) {
-      const request = (async () => response) as typeof fetch;
-      try { await synthesizeReply("Hello", { connectionId: "voice-a", voice: "" }, new AbortController().signal, request); throw new Error("expected failure"); }
-      catch (error) { expect(String(error)).not.toContain("SECRET"); expect(String(error)).not.toContain("evil"); }
-    }
-  });
-  test("enforces advertised and streamed byte bounds", async () => {
-    await expect(boundedBytes(new Response("12345", { headers: { "Content-Length": "5" } }), 4, new AbortController().signal)).rejects.toThrow();
-    await expect(boundedBytes(new Response("12345"), 4, new AbortController().signal)).rejects.toThrow();
-    expect(await boundedBytes(new Response("1234"), 4, new AbortController().signal)).toEqual(new TextEncoder().encode("1234"));
-  });
-  test("cancelled speech does not expose an audio buffer", async () => {
-    const controller = new AbortController(); controller.abort();
-    await expect(boundedBytes(new Response("123"), 4, controller.signal)).rejects.toMatchObject({ name: "AbortError" });
-  });
-  test("cancels advertised oversized response bodies before reading them", async () => {
-    let cancelled = false;
-    const body = new ReadableStream<Uint8Array>({ cancel() { cancelled = true; } });
-    await expect(boundedBytes(new Response(body, { headers: { "Content-Length": "5" } }), 4, new AbortController().signal)).rejects.toThrow();
-    expect(cancelled).toBe(true);
-  });
-  test("aborting a pending reader cancels the underlying stream", async () => {
-    let cancelled = false;
-    const controller = new AbortController();
-    const body = new ReadableStream<Uint8Array>({ cancel() { cancelled = true; } });
-    const reading = boundedBytes(new Response(body), 4, controller.signal);
-    controller.abort();
-    await expect(reading).rejects.toMatchObject({ name: "AbortError" });
-    expect(cancelled).toBe(true);
-  });
-  test("a pre-cancelled speech action never makes a provider request", async () => {
+  test("rejects invalid text and pre-cancelled actions before host playback", async () => {
     let calls = 0;
+    const api = { speak: async () => { calls += 1; }, subscribe: () => () => {} } as unknown as SpindleTTSAPI;
+    for (const text of ["", "x".repeat(MAX_SPEECH_CHARS + 1)]) await expect(speakReply(text, "voice-a", new AbortController().signal, api)).rejects.toThrow();
     const controller = new AbortController(); controller.abort();
-    const request = (async () => { calls += 1; return new Response(); }) as typeof fetch;
-    await expect(synthesizeReply("Hello", { connectionId: "voice-a", voice: "" }, controller.signal, request)).rejects.toMatchObject({ name: "AbortError" });
+    await expect(speakReply("Hello", "voice-a", controller.signal, api)).rejects.toMatchObject({ name: "AbortError" });
     expect(calls).toBe(0);
+  });
+  test("cancels host playback and cleans up its subscription", async () => {
+    const playback = deferred<void>(); let stopped = 0; let removed = 0;
+    const api = { speak: () => playback.promise, stop() { stopped += 1; playback.resolve(); }, subscribe: () => () => { removed += 1; } } as unknown as SpindleTTSAPI;
+    const controller = new AbortController();
+    const result = speakReply("Hello", "voice-a", controller.signal, api); await settle(); controller.abort();
+    await expect(result).rejects.toMatchObject({ name: "AbortError" });
+    expect(stopped).toBe(1); expect(removed).toBe(1);
+  });
+  test("sanitizes host failures without retrying playback", async () => {
+    let calls = 0;
+    const api = { speak: async () => { calls += 1; throw new Error("PRIVATE_PROVIDER_ERROR"); }, subscribe: () => () => {} } as unknown as SpindleTTSAPI;
+    await expect(speakReply("Hello", "voice-a", new AbortController().signal, api)).rejects.toThrow("Speech could not play");
+    expect(calls).toBe(1);
   });
 });

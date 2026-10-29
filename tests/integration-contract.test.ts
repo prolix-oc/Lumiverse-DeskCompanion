@@ -1,14 +1,20 @@
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 const root = join(import.meta.dir, "..");
 const source = (path: string) => readFileSync(join(root, path), "utf8");
 
+test("all extension modules route through Spindle without direct HTTP or REST calls", () => {
+  for (const file of readdirSync(join(root, "src")).filter((name) => name.endsWith(".ts"))) {
+    expect(source(`src/${file}`)).not.toMatch(/\bfetch\b|\/api\/v\d|XMLHttpRequest|MediaRecorder|getUserMedia/);
+  }
+});
+
 test("declares distinct main and lightweight system widget entries", () => {
   const manifest = JSON.parse(source("spindle.json"));
   expect(manifest.entry_frontend_widget).toBe("dist/widget.js");
-  expect(manifest.permissions).toEqual(["ui_panels", "characters", "generation", "screen_capture", "screen_recording"]);
+  expect(manifest.permissions).toEqual(["ui_panels", "characters", "generation", "screen_capture", "screen_recording", "media"]);
   expect(source("src/widget.ts")).toContain("export function setupWidget");
   expect(source("src/frontend.ts")).toContain("export function setup");
   expect(source("src/companion-widget.ts")).toContain("ctx.ui.createFloatWidget");
