@@ -1538,40 +1538,54 @@ function mountView(ctx, root, options = {}) {
   });
   Promise.allSettled([speechListing, inputListing]).finally(() => window.clearTimeout(listingTimeout));
   const resynchronize = () => {
-    if (!disposed && document.visibilityState !== "hidden") {
-      discoverInputProviders();
-      retainSettingsEdits();
-      subscribe();
+    if (disposed || disposing)
+      return;
+    retainSettingsEdits();
+    if (subscription)
+      window.clearTimeout(subscription.timer);
+    subscription = null;
+    if (catalogTimeout !== null)
+      window.clearTimeout(catalogTimeout);
+    if (devicesTimeout !== null)
+      window.clearTimeout(devicesTimeout);
+    catalogTimeout = null;
+    devicesTimeout = null;
+    catalogId = null;
+    devicesId = null;
+    if (approvalQuery)
+      window.clearTimeout(approvalQuery.timer);
+    approvalQuery = null;
+    approval = null;
+    approvalCheckedKey = "";
+    subscribe();
+    refresh();
+    updateControls();
+  };
+  cleanups.push(ctx.events.on("CONNECTED", (payload) => {
+    if (record(payload) && typeof payload.role === "string" && payload.role.length > 0)
+      resynchronize();
+  }));
+  const restorePage = (event) => {
+    if (event.persisted)
+      resynchronize();
+  };
+  const refreshAvailability = () => {
+    if (disposed || document.visibilityState === "hidden")
+      return;
+    discoverInputProviders();
+    if (catalog)
+      discoverDevices();
+    else
       refresh();
-      updateControls();
-    }
+    updateControls();
   };
-  window.addEventListener("pageshow", resynchronize);
-  window.addEventListener("online", resynchronize);
-  document.addEventListener("visibilitychange", resynchronize);
-  window.addEventListener("focus", discoverDevices);
-  const refreshInputProviders = () => {
-    if (!disposed) {
-      discoverInputProviders();
-      updateControls();
-    }
-  };
-  window.addEventListener("focus", refreshInputProviders);
-  let discoveryTimer;
-  const pollDevices = () => {
-    if (!disposed && document.visibilityState !== "hidden")
-      subscribe();
-    discoverDevices();
-    discoveryTimer = window.setTimeout(pollDevices, 1e4);
-  };
-  discoveryTimer = window.setTimeout(pollDevices, 1e4);
+  window.addEventListener("pageshow", restorePage);
+  document.addEventListener("visibilitychange", refreshAvailability);
+  window.addEventListener("focus", refreshAvailability);
   cleanups.push(() => {
-    window.removeEventListener("pageshow", resynchronize);
-    window.removeEventListener("online", resynchronize);
-    document.removeEventListener("visibilitychange", resynchronize);
-    window.removeEventListener("focus", discoverDevices);
-    window.removeEventListener("focus", refreshInputProviders);
-    window.clearTimeout(discoveryTimer);
+    window.removeEventListener("pageshow", restorePage);
+    document.removeEventListener("visibilitychange", refreshAvailability);
+    window.removeEventListener("focus", refreshAvailability);
   });
   updateControls();
   return { panel, dispose: () => {

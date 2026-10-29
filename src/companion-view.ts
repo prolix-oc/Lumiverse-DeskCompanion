@@ -878,18 +878,34 @@ export function mountView(ctx: SpindleFrontendContext, root: HTMLElement, option
     updateControls();
   }).catch(() => { if (!disposed) element("input-status").textContent = "STT connections could not be loaded. Choose Whistle or reopen settings to retry."; });
   void Promise.allSettled([speechListing, inputListing]).finally(() => window.clearTimeout(listingTimeout));
-  const resynchronize = () => { if (!disposed && document.visibilityState !== "hidden") { discoverInputProviders(); retainSettingsEdits(); subscribe(); refresh(); updateControls(); } };
-  window.addEventListener("pageshow", resynchronize);
-  window.addEventListener("online", resynchronize);
-  document.addEventListener("visibilitychange", resynchronize);
-  window.addEventListener("focus", discoverDevices);
-  const refreshInputProviders = () => { if (!disposed) { discoverInputProviders(); updateControls(); } };
-  window.addEventListener("focus", refreshInputProviders);
-  // Discovery only: never request a capture, input, generation, or speech here.
-  let discoveryTimer: number;
-  const pollDevices = () => { if (!disposed && document.visibilityState !== "hidden") subscribe(); discoverDevices(); discoveryTimer = window.setTimeout(pollDevices, 10000); };
-  discoveryTimer = window.setTimeout(pollDevices, 10000);
-  cleanups.push(() => { window.removeEventListener("pageshow", resynchronize); window.removeEventListener("online", resynchronize); document.removeEventListener("visibilitychange", resynchronize); window.removeEventListener("focus", discoverDevices); window.removeEventListener("focus", refreshInputProviders); window.clearTimeout(discoveryTimer); });
+  const resynchronize = () => {
+    if (disposed || disposing) return;
+    retainSettingsEdits();
+    if (subscription) window.clearTimeout(subscription.timer);
+    subscription = null;
+    if (catalogTimeout !== null) window.clearTimeout(catalogTimeout);
+    if (devicesTimeout !== null) window.clearTimeout(devicesTimeout);
+    catalogTimeout = null; devicesTimeout = null; catalogId = null; devicesId = null;
+    if (approvalQuery) window.clearTimeout(approvalQuery.timer);
+    approvalQuery = null; approval = null; approvalCheckedKey = "";
+    subscribe(); refresh(); updateControls();
+  };
+  cleanups.push(ctx.events.on("CONNECTED", payload => {
+    // The host also emits an empty local socket-open event; wait for its
+    // authenticated server acknowledgement before restoring our subscription.
+    if (record(payload) && typeof payload.role === "string" && payload.role.length > 0) resynchronize();
+  }));
+  const restorePage = (event: PageTransitionEvent) => { if (event.persisted) resynchronize(); };
+  const refreshAvailability = () => {
+    if (disposed || document.visibilityState === "hidden") return;
+    discoverInputProviders();
+    if (catalog) discoverDevices(); else refresh();
+    updateControls();
+  };
+  window.addEventListener("pageshow", restorePage);
+  document.addEventListener("visibilitychange", refreshAvailability);
+  window.addEventListener("focus", refreshAvailability);
+  cleanups.push(() => { window.removeEventListener("pageshow", restorePage); document.removeEventListener("visibilitychange", refreshAvailability); window.removeEventListener("focus", refreshAvailability); });
   updateControls();
 
   return { panel, dispose: () => {

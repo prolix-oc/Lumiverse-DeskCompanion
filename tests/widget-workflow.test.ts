@@ -48,7 +48,7 @@ async function widget(options: { stt?: Promise<Response>; silence?: Promise<void
   let speaking = false;
   const recognitions: Array<{ options: SpindleSTTStartOptions; cancelled: boolean; finished: boolean }> = [];
   const outgoing: any[] = [];
-  const events = new Map<string, (payload: unknown) => void>();
+  const events = new Map<string, Set<(payload: unknown) => void>>();
   let microphoneRequests = 0;
   let tracksStopped = 0;
   let playback = 0;
@@ -130,7 +130,10 @@ async function widget(options: { stt?: Promise<Response>; silence?: Promise<void
     } },
     permissions: { async getGranted() { return ["ui_panels", "characters", "generation", "screen_capture", "screen_recording", ...(options.noMedia ? [] : ["media"])]; } },
     getActiveChat: () => ({ characterId: "character-a", chatId: null }),
-    events: { on(name: string, callback: (payload: unknown) => void) { events.set(name, callback); return () => events.delete(name); } },
+    events: { on(name: string, callback: (payload: unknown) => void) {
+      const handlers = events.get(name) ?? new Set(); handlers.add(callback); events.set(name, handlers);
+      return () => { handlers.delete(callback); };
+    } },
     sendToBackend(payload: any) {
       outgoing.push(payload);
       if (options.dropInitialSubscription && !droppedSubscription && payload.type === "configure") {
@@ -163,7 +166,9 @@ async function widget(options: { stt?: Promise<Response>; silence?: Promise<void
   return { host, view, settings, context, dom, outgoing, events, element, enable, synchronize, requests, editors, components, recognitions, speechCalls, isSpeaking: () => speaking,
     setDevices: (value: typeof devices) => { devices = value; },
     advanceClock: () => { clock += 10001; },
-    discover: () => runTimers(10000),
+    discover: async () => { dom.window.dispatchEvent(new dom.window.Event("focus")); await settle(); },
+    idle: () => runTimers(10000),
+    connected: async (payload: unknown = { role: "user" }) => { for (const callback of [...events.get("CONNECTED") ?? []]) callback(payload); await settle(); },
     debounceSettings: synchronize,
     settingsTimers: () => [...timers].filter(([, timer]) => timer.delay === 300).map(([id]) => id),
     expireDiscovery: () => runTimers(8000),
@@ -185,6 +190,62 @@ async function widget(options: { stt?: Promise<Response>; silence?: Promise<void
 }
 
 describe("configured widget share pipeline", () => {
+  test("idle time never polls connections or redraws shared controls", async () => {
+    const screen = await widget();
+    try {
+      const sent = screen.outgoing.length;
+      const queries = screen.host.gets.length;
+      const updates = screen.components.map(component => component.updates);
+      await screen.idle(); await screen.idle(); await screen.idle();
+      expect(screen.outgoing).toHaveLength(sent);
+      expect(screen.host.gets).toHaveLength(queries);
+      expect(screen.components.map(component => component.updates)).toEqual(updates);
+      expect(screen.settings.panel.querySelector('[data-role="sync-status"]')!.textContent).toBe("Saved");
+    } finally { await screen.close(); }
+  });
+
+  test("returning to the window checks desktops without resubscribing or reloading controls", async () => {
+    const screen = await widget();
+    try {
+      const subscriptions = screen.outgoing.filter(message => message.type === "subscribe").length;
+      const catalogs = screen.outgoing.filter(message => message.type === "catalog").length;
+      const queries = screen.host.gets.filter(entry => entry.kind === "devices").length;
+      const updates = screen.components.map(component => component.updates);
+      screen.dom.window.dispatchEvent(new screen.dom.window.Event("focus"));
+      screen.dom.window.document.dispatchEvent(new screen.dom.window.Event("visibilitychange"));
+      await settle();
+      expect(screen.host.gets.filter(entry => entry.kind === "devices").length).toBeGreaterThan(queries);
+      expect(screen.outgoing.filter(message => message.type === "subscribe")).toHaveLength(subscriptions);
+      expect(screen.outgoing.filter(message => message.type === "catalog")).toHaveLength(catalogs);
+      expect(screen.components.map(component => component.updates)).toEqual(updates);
+      expect(screen.element("badge").textContent).toBe("Ready");
+    } finally { await screen.close(); }
+  });
+
+  test("Spindle's authenticated connection event restores subscriptions and retains the input debounce", async () => {
+    const screen = await widget();
+    try {
+      const subscriptions = screen.outgoing.filter(message => message.type === "subscribe").length;
+      await screen.connected({});
+      expect(screen.outgoing.filter(message => message.type === "subscribe")).toHaveLength(subscriptions);
+      screen.host.events.get("FRONTEND_SESSION_CLOSED")?.({ frontendSessionId: "session-a" }, "user-a");
+      screen.host.events.get("FRONTEND_SESSION_CLOSED")?.({ frontendSessionId: "session-b" }, "user-a");
+      await settle();
+      const field = screen.components.find(c => c.options.ariaLabel === "Optional question or direction")!;
+      field.options.onChange("Keep this edit through reconnect");
+      const saves = screen.outgoing.filter(message => message.type === "configure").length;
+      await screen.connected();
+      expect(screen.outgoing.filter(message => message.type === "subscribe")).toHaveLength(subscriptions + 2);
+      expect(screen.outgoing.filter(message => message.type === "configure")).toHaveLength(saves);
+      expect(field.options.value).toBe("Keep this edit through reconnect");
+      await screen.debounceSettings();
+      expect(screen.outgoing.filter(message => message.type === "configure")).toHaveLength(saves + 1);
+      expect(screen.settings.panel.querySelector('[data-role="sync-status"]')!.textContent).toBe("Saved");
+      expect(screen.element<HTMLButtonElement>("observe").disabled).toBe(false);
+      expect(screen.host.requests).toHaveLength(0); expect(screen.recognitions).toHaveLength(0); expect(screen.host.generations).toHaveLength(0);
+    } finally { await screen.close(); }
+  });
+
   test("settings input restarts the debounce and discovery cannot save early or repeatedly", async () => {
     const screen = await widget();
     try {
@@ -736,7 +797,7 @@ describe("configured widget share pipeline", () => {
     } finally { screen.host.emit = emit; await screen.close(); }
   });
 
-  test("discovers newly enabled capture without refreshing, starting media, or reloading resource catalogs", async () => {
+  test("discovers newly enabled capture on focus without starting media or reloading resource catalogs", async () => {
     const screen = await widget({ offline: true });
     try {
       expect(screen.element<HTMLButtonElement>("observe").disabled).toBe(true);
